@@ -13,7 +13,7 @@
 // The table is then duplicated (and mirrored) to 32 bytes to simplify
 // lookup for tiles 16-31 (where the L0 ROM is read backwards).
 // To see how it's calculated, see l0.py.
-static const uint8_t VSHRINK_MAGIC[32] = { 
+static const uint8_t VSHRINK_MAGIC[32] = {
 	1, 9, 5, 13, 3, 11, 7, 15, 0, 8, 4, 12, 2, 10, 6, 14,
 	14, 6, 10, 2, 12, 4, 8, 0, 15, 7, 11, 3, 13, 5, 9, 1
 };

@@ -1033,7 +1033,7 @@ char* m68ki_disassemble_quick(unsigned int pc, unsigned int cpu_type);
 // they access the global state directly (recompiler uses restricted pointers
 // for performance). So we compile them out, and we will reimplement them as
 // needed in m68k_recompiler.h
-#ifndef M68K_RECOMPILER  
+#ifndef M68K_RECOMPILER
 
 /* ======================================================================== */
 /* =========================== UTILITY FUNCTIONS ========================== */

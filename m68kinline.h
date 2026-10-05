@@ -43,10 +43,10 @@ static inline unsigned int  m68k_read_memory_32(unsigned int address) {
 static inline void m68k_write_memory_8(unsigned int address, unsigned int val) {
 	*(volatile uint8_t* restrict)(address) = val;
 }
-static inline void m68k_write_memory_16(unsigned int address, unsigned int val) { 
-	*(volatile uint16_t* restrict)(address) = val;	
+static inline void m68k_write_memory_16(unsigned int address, unsigned int val) {
+	*(volatile uint16_t* restrict)(address) = val;
 }
-static inline void m68k_write_memory_32(unsigned int address, unsigned int val) { 
+static inline void m68k_write_memory_32(unsigned int address, unsigned int val) {
 	*(volatile u_uint32_t* restrict)(address) = val;
 }
 

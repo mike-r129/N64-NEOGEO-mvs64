@@ -1,8 +1,8 @@
 #ifndef PLATFORM_H
 #define PLATFORM_H
 
-#define likely(x)      __builtin_expect(!!(x), 1) 
-#define unlikely(x)    __builtin_expect(!!(x), 0) 
+#define likely(x)      __builtin_expect(!!(x), 1)
+#define unlikely(x)    __builtin_expect(!!(x), 0)
 
 #ifdef N64
 	#include <libdragon.h>
@@ -31,8 +31,8 @@
 		PLAT_KEY_P1_LEFT = 3,
 		PLAT_KEY_P1_RIGHT = 4,
 		PLAT_KEY_P1_A = 5,
-		PLAT_KEY_P1_B = 6, 
-		PLAT_KEY_P1_C = 7, 
+		PLAT_KEY_P1_B = 6,
+		PLAT_KEY_P1_C = 7,
 		PLAT_KEY_P1_D = 8,
 		PLAT_KEY_P1_START = 9,
 		PLAT_KEY_P1_SELECT = 10,

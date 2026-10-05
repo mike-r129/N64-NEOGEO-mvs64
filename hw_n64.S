@@ -687,5 +687,3 @@ asm_pbrom_bankno_w:
 
 1:	li k0, 1
 	jr ra
-	
-

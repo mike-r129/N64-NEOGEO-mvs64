@@ -23,7 +23,7 @@ cycle-level accuracy. In particular:
     between accuracy and emulation speed. The emulated cycle counts should be
     quite close to the original hardware, with an expected error within 3%.
   * `M64K_CONFIG_TIMING_ACCURACY = 1`. This is the full accuracy option: all
-    opcodes are expected to emulate the exact cycle count as real hardware. 
+    opcodes are expected to emulate the exact cycle count as real hardware.
     Activating this mode will provide the maximum accuracy at the expense of
     code size and some emulation speed.
   * `M64K_CONFIG_TIMING_ACCURACY < 0`. This is a "quick hack" mode: all opcodes
@@ -53,7 +53,7 @@ memory accesses with high-speed. The assumption is that most accesses will
 either be to ROM or RAM and thus to a memory-like area where no further action
 must be taken by the emulator beyond actually reading / writing the memory.
 Thus, m64k requests that all memory banks are actually TLB-mapped. To do so,
-it offers a helper function in its API (m64k_map_memory). 
+it offers a helper function in its API (m64k_map_memory).
 
 There are a few constraints to be aware:
 
@@ -158,7 +158,7 @@ void my_write_handler(uint32_t address, uint16_t value, int sz) {
       vram_ptr++;
       vram_ptr &= 0x3FFF;
       return;
-    } 
+    }
     default:
       debugf("[MMIO] unknown write: %06lx (%c)\n", address, sz == 1 ? 'b' : 'w');
       return 0xFFFF;
@@ -211,7 +211,7 @@ For write handlers:
 | `t6` (input) | value being written |
 | `k0` (output) | non-zero if handled, 0 if not handled (fallback to C handler) |
 
-The registers freely available in the assembly handlers are k0, k1, t6, at. 
+The registers freely available in the assembly handlers are k0, k1, t6, at.
 All other registers must be preserved.
 
 This is how you would implement the VRAM handlers defined in C above:
@@ -271,7 +271,7 @@ handlers like this:
 ```C
 extern uint8_t my_read_handler[], my_write_handler[]; // assembly functions
 
-m64k_set_mmio_fast_handlers(&m64ks, 
+m64k_set_mmio_fast_handlers(&m64ks,
   my_read_handler, my_write_handler, my_read_handler, my_write_handler, );
 ```
 
@@ -364,7 +364,7 @@ flag. Again the implementation is valid for 8, 16 and 32-bit variants:
     # either 24, 16 or 0 for 8-bit, 16-bit and 32-bit operation respectively.
     # This means that the carry ends up on bit 33, correctly affecting the C
     # flag, and the result goes in the lower 32-bits affecting the Z flag.
-    dsll flag_zc, result, rmw_bitsize 
+    dsll flag_zc, result, rmw_bitsize
 
     # Copy C flag (bit 32) into flag X (bit 0)
     dsrl flag_x, flag_zc, 32
@@ -372,8 +372,8 @@ flag. Again the implementation is valid for 8, 16 and 32-bit variants:
     # We now need to perform a second addition with sign-extended operands
     # to calculate the overflow flag. So first left-align the operands using
     # 32-bit shifts, that will sign-extends the operands.
-    sllv t0, t0, rmw_bitsize 
-    sllv t1, t1, rmw_bitsize 
+    sllv t0, t0, rmw_bitsize
+    sllv t1, t1, rmw_bitsize
 
     # Do the addition of sign-extended operands. This will create the correct
     # left-aligned result in the lower 32-bit bits of flag_nv, correctly
@@ -398,6 +398,6 @@ As
 
 I'd like to thank calc84maniac who came up with the initial idea for the smart
 flag handling, and later helped me implementing the most complex opcodes with
-their witty optimization tricks. 
+their witty optimization tricks.
 
 Also thanks to Mast of Destiny for general 68000 advices and guidance.

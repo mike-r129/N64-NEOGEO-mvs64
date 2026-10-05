@@ -72,7 +72,7 @@ static uint64_t m68k_exec(uint64_t clock) {
 		debugf("m68k_exec: %d\n", (int)(clock - m68k_clock));
 		m68k_clock = m64k_run(&m64k, clock);
 		#else
-		m68k_clock += m68k_execute(clock - m68k_clock);	
+		m68k_clock += m68k_execute(clock - m68k_clock);
 		#endif
 	}
 	return m68k_clock * M68K_CLOCK_DIV;
@@ -150,7 +150,7 @@ void emu_cpu_irq(int irq, bool on) {
 
 #ifdef N64
 int cpu_irqack(void *ctx, int level)
-{	
+{
 	// On NeoGeo hardware, interrupts must be manually acknowledged via a write
 	// to register 0x3C000C. So we do nothing here.
 	// NOTE: we still must register this hook, otherwise the m64k core will
@@ -226,7 +226,7 @@ void emu_run_frame(void) {
         e->current = false;
 
         // Call the event callback, and check if it must be repeated.
-        if (g_clock >= e->clock) {    	
+        if (g_clock >= e->clock) {
 	        uint32_t repeat = e->cb(e->cbarg);
 	        if (repeat != 0) e->clock += repeat;
 	        else e->cb = NULL;
@@ -248,7 +248,7 @@ int main(int argc, char *argv[]) {
 		fprintf(stderr, "Usage:\n    mvs64 <romdir>\n");
 		return 1;
 	}
-	#else 
+	#else
 	argc = 0; argv = NULL;
 	#endif
 
@@ -275,7 +275,7 @@ int main(int argc, char *argv[]) {
 	m64k_pulse_reset(&m64k);
 	#else
 	m68k_set_cpu_type(M68K_CPU_TYPE_68000);
-	m68k_pulse_reset();	
+	m68k_pulse_reset();
 	#endif
 	m68k_clock = 0;
 

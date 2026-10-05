@@ -76,7 +76,7 @@ uint8_t* srom_get_sprite(int spritenum) {
 uint8_t* crom_get_sprite(int spritenum) {
 	spritenum &= crom_mask;
 	if (spritenum >= crom_num_tiles) spritenum = crom_num_tiles-1;
-	
+
 	uint8_t *pix = sprite_cache_lookup(&crom_cache, spritenum);
 	if (pix) return pix;
 
@@ -366,7 +366,7 @@ static void rom(const char *dir, const char* name, int off, int sz, uint8_t *buf
 #define strcatalloc(a, b) ({ char v[strlen(a)+strlen(b)+1]; strcpy(v, a); strcat(v, b); strdup(v); })
 
 static uint32_t ini_get_integer(const char *ini, const char *key, bool *ok) {
-	int klen = strlen(key); char *kv; 
+	int klen = strlen(key); char *kv;
 	if ((kv = strstr(ini, key)) && kv[klen] == '=') {
 		kv += klen+1;
 		if (ok) *ok = true;
@@ -412,7 +412,7 @@ void rom_load(const char *dir) {
 	#ifdef N64
 	dir = "";
 	#endif
-	
+
 	srom_fn[0] = strcatalloc(dir, "s.bios");
 	srom_fn[1] = strcatalloc(dir, "s.rom");
 	crom_fn[0] = strcatalloc(dir, "c.rom");
@@ -422,4 +422,3 @@ void rom_load(const char *dir) {
 	crom_set_bank(0);
 	pbrom_init(strcatalloc(dir, "b.rom"));
 }
-

@@ -217,7 +217,7 @@ void run_testsuite(const char *fn)
             }
         }
     }
-    
+
     if (M64K_CONFIG_TIMING_ACCURACY >= 0 && approx_timing) {
         total_cycle_total += cycle_total;
         total_cycle_diff += cycle_diff;
@@ -333,7 +333,7 @@ int main()
 
         "rom:/NOP.btest",
         "rom:/RESET.btest",
-    
+
         "rom:/LINK.btest",
         "rom:/UNLINK.btest",
 

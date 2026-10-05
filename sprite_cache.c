@@ -100,7 +100,7 @@ uint8_t* sprite_cache_lookup(SpriteCache *c, uint32_t key) {
 			b->last_tick = c->cur_tick;
 			return b->sprite;
 		}
-		
+
 		int desired = hash(b->key) & (c->num_buckets-1);
 		int cur_dist = (bidx + c->num_buckets - desired) & (c->num_buckets-1);
 		if (cur_dist < dist)

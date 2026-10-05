@@ -63,7 +63,7 @@ To build the PC version, run:
 This will build a `emu` binary. This PC version tries to stay as close
 as possible to the N64 version, so it's not optimized to be a fully standalone
 PC emulator. In particular, it doesn't load standard game ZIP files, but it
-uses the preprocessed ROMs that are generated as part of the N64 build system. 
+uses the preprocessed ROMs that are generated as part of the N64 build system.
 
 To use the PC version of the emulator on a specific game, first build the N64
 emulator for that game using the `make mvs64` command above.
@@ -72,5 +72,3 @@ During the build, you will notice that a folder called `game.n64/` (next to
 embedded in the final `.z64` file. Pass that folder to the `emu` binary:
 
 	$ ./emu <path/to/game.n64/>
-
-

@@ -267,7 +267,7 @@
  * @param rdram_addr    Address of the texture in RDRAM
  * @param width         Width of the texture in pixels
  * @param height        Height of the texture in pixels
- * @param pitch         Pitch of the texture in RDRAM in bytes, 
+ * @param pitch         Pitch of the texture in RDRAM in bytes,
  *                      or RDP_AUTO_PITCH in case the texture is linear in memory.
  * @param tmem_addr     Address of TMEM where to load the texture,
  *                      or RDP_AUTO_TMEM_SLOT(n) to load the texture in the Nth

@@ -13,10 +13,10 @@
 # 1) The original ROM is 128Kb in size and mvs64 has
 # very little RDRAM available to waste with tables.
 # 2) mvs64 uses a tile-based rendering engine because
-# line-based rendering would be too slow, so the 
+# line-based rendering would be too slow, so the
 # original ROM isn't actually a good fit.
 #
-########################################################## 
+##########################################################
 
 import sys
 
@@ -57,7 +57,7 @@ print("Magic table: ", magic + magic[::-1])
 # These functions are the two primitives required
 # to render NeoGeo sprites with pixel-perfect vertical
 # shrinking with a tile-based engine (rather than
-# a line-based engine, which would be easier to 
+# a line-based engine, which would be easier to
 # implement but too slow for mvs64).
 ############################################
 

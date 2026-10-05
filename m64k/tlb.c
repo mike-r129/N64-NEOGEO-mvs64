@@ -21,7 +21,7 @@ static int tlb_map_area_internal(uint32_t virt, uint32_t vmask, uint32_t phys, i
 			if (low_half) {
 				assertf((exentry0 & 2) == 0, "Duplicated TLB entry with vaddr %08lx (%lx/%lx)", vpn2, exentry0, exentry1);
 			} else {
-				assertf((exentry1 & 2) == 0, "Duplicated TLB entry with vaddr %08lx (%lx/%lx)", vpn2, exentry0, exentry1);			
+				assertf((exentry1 & 2) == 0, "Duplicated TLB entry with vaddr %08lx (%lx/%lx)", vpn2, exentry0, exentry1);
 			}
 		}
 		// Reuse the same TLB index.
@@ -39,7 +39,7 @@ static int tlb_map_area_internal(uint32_t virt, uint32_t vmask, uint32_t phys, i
 		entry |= (1<<2); // dirty bit
 	entry |= 1<<1; // valid bit
 	entry |= 1<<0; // global bit
-	
+
 	// Write it into the correct slot, keeping the other slot intact in case
 	// it contains other data.
 	if (low_half) {
@@ -74,7 +74,7 @@ uint32_t __m64k_tlb_add(void *virt, uint32_t vmask, uint32_t phys, int flags)
 	case 0x07FFFF: C0_WRITE_PAGEMASK(0x3F << 13); dbl=true;  break;
 	case 0x0FFFFF: C0_WRITE_PAGEMASK(0xFF << 13); dbl=false; break;
 	case 0x1FFFFF: C0_WRITE_PAGEMASK(0xFF << 13); dbl=true;  break;
-	default: assertf(0, "invalid vmask %08lx", vmask); abort(); 
+	default: assertf(0, "invalid vmask %08lx", vmask); abort();
     }
 
 	// If this is a double mapping, we are going to write two slots, and each
@@ -123,7 +123,7 @@ void __m64k_tlb_change(uint32_t mid, uint32_t phys, int flags)
 	// Read the existing entry
 	C0_WRITE_INDEX(idx);
 	C0_TLBR();
-	
+
 	// Create the new entry
 	uint32_t entry = (phys & 0x3FFFF000) >> 6;
 	if (!(flags & TLBF_READONLY))
@@ -154,7 +154,7 @@ void __m64k_tlb_rem(uint32_t mid)
 		C0_TLBWI();
 		return;
 	}
-	
+
 	C0_TLBR();
 	if (mid & 1)
 		C0_WRITE_ENTRYLO0(0);
