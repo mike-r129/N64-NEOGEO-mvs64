@@ -145,8 +145,7 @@ static inline void z80_snap(struct z80snap *s, const z80 *z) {
 	s->q2 = (uint64_t)z->d_ | ((uint64_t)z->e_ << 8) | ((uint64_t)z->h_ << 16) |
 	        ((uint64_t)z->l_ << 24) | ((uint64_t)z->f_ << 32) |
 	        ((uint64_t)z->i << 40) |
-	        ((uint64_t)(uint8_t)((z->sf<<7)|(z->zf<<6)|(z->yf<<5)|(z->hf<<4)|
-	                             (z->xf<<3)|(z->pf<<2)|(z->nf<<1)|(z->cf)) << 48) |
+	        ((uint64_t)z->f << 48) |
 	        ((uint64_t)(uint8_t)((z->iff1?1:0)|(z->iff2?2:0)|
 	                             (z->interrupt_mode<<2)) << 56);
 }

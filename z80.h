@@ -26,8 +26,9 @@ struct z80 {
   uint8_t a_, b_, c_, d_, e_, h_, l_, f_; // alternate registers
   uint8_t i, r; // interrupt vector, memory refresh
 
-  // flags: sign, zero, yf, half-carry, xf, parity/overflow, negative, carry
-  bool sf : 1, zf : 1, yf : 1, hf : 1, xf : 1, pf : 1, nf : 1, cf : 1;
+  // flags in the Z80 F register layout: S Z Y H X P/V N C (bit 7..0); see
+  // FLAG_* in z80.c
+  uint8_t f;
 
   uint8_t iff_delay;
   uint8_t interrupt_mode;
