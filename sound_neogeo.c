@@ -109,7 +109,6 @@ static uint8_t ym_addr_b;                // last register selected on YM port B
 // same until an external event (the timer IRQ), which fires at the deadline.
 // Delay loops are NOT skipped — they mutate a register (e.g. DJNZ's B), so the
 // snapshot compare fails. This is the sound-CPU analog of the 68k idle-skip.
-static int z80_wrote;                    // set by z80_out/z80_write = real work
 #ifdef SND_HEALTH
 static unsigned long g_z80_steps, g_z80_skipcyc; static int g_z80_skips;
 #endif
@@ -146,8 +145,7 @@ static inline void z80_snap(struct z80snap *s, const z80 *z) {
 	s->q2 = (uint64_t)z->d_ | ((uint64_t)z->e_ << 8) | ((uint64_t)z->h_ << 16) |
 	        ((uint64_t)z->l_ << 24) | ((uint64_t)z->f_ << 32) |
 	        ((uint64_t)z->i << 40) |
-	        ((uint64_t)(uint8_t)((z->sf<<7)|(z->zf<<6)|(z->yf<<5)|(z->hf<<4)|
-	                             (z->xf<<3)|(z->pf<<2)|(z->nf<<1)|(z->cf)) << 48) |
+	        ((uint64_t)z->f << 48) |
 	        ((uint64_t)(uint8_t)((z->iff1?1:0)|(z->iff2?2:0)|
 	                             (z->interrupt_mode<<2)) << 56);
 }
@@ -232,6 +230,7 @@ static int g_irq_redeliver;                 // level-triggered re-asserts (see a
 #endif
 static void ym_irq_handler(int irq) {
 	ym_irq_level = irq;
+	cpu.irq_line = irq;                     // z80_run re-asserts while high
 	if (irq) z80_gen_int(&cpu, 0xff);       // assert (IM1 -> RST 38h)
 	else     cpu.int_pending = 0;           // deassert if not yet serviced
 }
@@ -304,7 +303,7 @@ static uint8_t z80_read(void *ud, uint16_t addr) {
 static void z80_write(void *ud, uint16_t addr, uint8_t val) {
 	(void)ud;
 	if (addr >= 0xF800) z80_ram[addr - 0xF800] = val;    // only work RAM is writable
-	z80_wrote = 1;                                        // taints idle-skip window
+	cpu.wrote = 1;                                        // taints idle-skip window
 }
 
 static uint8_t z80_in(z80 *z, uint16_t port) {
@@ -324,7 +323,7 @@ static uint8_t z80_in(z80 *z, uint16_t port) {
 
 static void z80_out(z80 *z, uint16_t port, uint8_t val) {
 	(void)z;
-	z80_wrote = 1;                                        // taints idle-skip window
+	cpu.wrote = 1;                                        // taints idle-skip window
 	switch (port & 0xff) {
 	case 0x04: YM2610Write(0, val);
 #ifdef MVS64_SNDTRACE
@@ -656,16 +655,24 @@ int sound_gen_samples(int16_t *out, int nsamples) {
 				break;
 			}
 #endif
-			uint16_t pc0 = cpu.pc;
-			z80_wrote = 0;
+			// Run a batch of instructions up to the next loop edge, halt or
+			// event boundary (z80_run): only the batch's last instruction can
+			// be a loop edge, so the idle-skip checks below run once per batch
+			// instead of once per instruction, with identical results.
 #ifdef MVS64_Z80HIST
 			z80_hist[cpu.pc >> 4]++;
+			const unsigned long until = cpu.cyc + 1;   // one step per batch
+#else
+			const unsigned long until = next;
 #endif
-			z80_step_inline(&cpu);
+			uint16_t pc0;
+			unsigned nsteps = z80_run(&cpu, until, &pc0);
 #ifdef SND_HEALTH
-			g_z80_steps++;
+			g_z80_steps += nsteps;
+#else
+			(void)nsteps;
 #endif
-			if (z80_wrote) spin_armed = 0;      // any write breaks the pure spin
+			if (cpu.wrote_any) spin_armed = 0;  // any write breaks the pure spin
 #ifndef MVS64_NOIDLESKIP
 			// Self-jump spin (JP $ / JR $): the back-branch detector below
 			// never sees it (pc == pc0, not <), so the boot jingle's DI park
@@ -676,7 +683,7 @@ int sound_gen_samples(int16_t *out, int nsamples) {
 			// no NMI is pending and the maskable path can't fire (IFF1 clear,
 			// or no pending/level-held IRQ) — so k iterations land cyc on the
 			// same overshoot stepping would, with the same R.
-			if (cpu.pc == pc0 && !z80_wrote && !cpu.halted && !cpu.iff_delay &&
+			if (cpu.pc == pc0 && !cpu.wrote && !cpu.halted && !cpu.iff_delay &&
 			    !cpu.nmi_pending &&
 			    !(cpu.iff1 && (cpu.int_pending || ym_irq_level))) {
 				uint8_t op = z80_read(NULL, pc0);
@@ -792,7 +799,7 @@ int sound_gen_samples(int16_t *out, int nsamples) {
 				(unsigned long)(g_prof_ymt / (TICKS_PER_SECOND / 1000)),
 				(unsigned long)(g_prof_gen / (TICKS_PER_SECOND / 1000)),
 				g_cmd_lost, ym_timer_on[0], ym_timer_on[1],
-				g_irq_redeliver, g_nmi_precap, g_nmi_postcap);
+				g_irq_redeliver + (int)cpu.irq_redeliver, g_nmi_precap, g_nmi_postcap);
 #ifdef MVS64_STAGE_VERIFY
 			{
 				extern unsigned long stagev_runs, stagev_bad;

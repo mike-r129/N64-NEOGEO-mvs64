@@ -26,8 +26,9 @@ struct z80 {
   uint8_t a_, b_, c_, d_, e_, h_, l_, f_; // alternate registers
   uint8_t i, r; // interrupt vector, memory refresh
 
-  // flags: sign, zero, yf, half-carry, xf, parity/overflow, negative, carry
-  bool sf : 1, zf : 1, yf : 1, hf : 1, xf : 1, pf : 1, nf : 1, cf : 1;
+  // flags in the Z80 F register layout: S Z Y H X P/V N C (bit 7..0); see
+  // FLAG_* in z80.c
+  uint8_t f;
 
   uint8_t iff_delay;
   uint8_t interrupt_mode;
@@ -42,6 +43,16 @@ struct z80 {
   // sync with its memory map (bank switches); read_byte must still be set
   // for owners that call it directly. Writes stay on write_byte.
   const uintptr_t* rmap;
+
+  // MVS64 batch-run support (z80_run). The owner's write/port callbacks set
+  // `wrote`; z80_run clears it before each instruction, so after a run it
+  // tells whether the LAST instruction wrote, and `wrote_any` whether any
+  // instruction of the run did. `irq_line` is a level-triggered IRQ input:
+  // while it is nonzero, z80_run re-asserts the maskable interrupt (with the
+  // last int_data) before any instruction where IFF1 is set and none is
+  // pending; `irq_redeliver` counts those re-assertions.
+  uint8_t wrote, wrote_any, irq_line;
+  unsigned long irq_redeliver;
 };
 
 // MVS64: the Z80 per-step working set in one contiguous, 16-byte aligned
@@ -52,6 +63,7 @@ struct z80 {
 struct z80_hot {
   z80 cpu;
   uint8_t cyc_00[256], cyc_ed[256], cyc_ddfd[256];
+  uint8_t sz53p[256];   // S Z Y X P/V flags of each result byte (z80.c)
   uintptr_t rmap[256];
   uint8_t ram[0x800];
 };
@@ -63,24 +75,15 @@ void z80_debug_output(z80* const z);
 void z80_gen_nmi(z80* const z);
 void z80_gen_int(z80* const z, uint8_t data);
 
-// z80_step for the owner's hot run loop: same fetch / execute / event gate,
-// inlined into the caller so the per-step call and its 6-register frame go
-// away; interrupt servicing stays out of line. Identical to z80_step.
-void z80_exec_opcode(z80* const z, uint8_t opcode);
-void z80_process_interrupts(z80* const z);
-#ifndef MVS64_Z80OPHIST
-static inline void z80_step_inline(z80* const z) {
-  uint8_t opcode = 0x00;               // HALT executes NOPs in place
-  if (!z->halted) {
-    opcode = *(const uint8_t*)(z->rmap[z->pc >> 8] + z->pc);
-    z->pc++;
-  }
-  z80_exec_opcode(z, opcode);
-  if (z->iff_delay | (uint8_t)(z->nmi_pending | (z->int_pending & z->iff1)))
-    z80_process_interrupts(z);
-}
-#else
-#define z80_step_inline z80_step
-#endif
+// Run instructions until z->cyc reaches `until` (at least one), stopping
+// early after any instruction that ends on a loop edge (the new PC is at or
+// below that instruction's own address: backward branches, self-jumps,
+// repeating block ops, interrupt entry to a lower vector) or leaves the CPU
+// halted. Those are the only points where an owner's idle-loop detection has
+// anything to look at, so it runs once per batch instead of per instruction.
+// Returns the number of instructions executed; *last_pc receives the address
+// of the last one. Behaves exactly like calling z80_step() in a loop with the
+// irq_line re-assertion (see struct z80) before each step.
+unsigned z80_run(z80* const z, unsigned long until, uint16_t* last_pc);
 
 #endif // Z80_Z80_H_
