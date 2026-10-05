@@ -15,8 +15,37 @@ void plat_log(const char *fmt, ...) {
 
 volatile int N64_FRAME = 0;
 uint32_t RSP_OVL_ID = 0;
+uint32_t RSP_AUDIO_OVL_ID = 0;
+uint32_t RSP_FM_OVL_ID = 0;
 
 DEFINE_RSP_UCODE(rsp_video);
+DEFINE_RSP_UCODE(rsp_audio);
+DEFINE_RSP_UCODE(rsp_fm);
+
+// Boot-time self-test of the audio RSP overlay: round-trip a small buffer
+// through cmd_adpcm_test (DMA in, +1 every byte, DMA out). Proves overlay
+// registration, command dispatch and both DMA directions before the ADPCM
+// offload ever runs. One [RSPAUDIO] line either way.
+static void rsp_audio_selftest(void) {
+    static uint8_t src[64] __attribute__((aligned(16)));
+    static uint8_t dst[64] __attribute__((aligned(16)));
+    for (int i = 0; i < 64; i++) { src[i] = (uint8_t)(i * 3 + 7); dst[i] = 0; }
+    data_cache_hit_writeback_invalidate(src, sizeof(src));
+    data_cache_hit_writeback_invalidate(dst, sizeof(dst));
+    rspq_write(RSP_AUDIO_OVL_ID, 0x0, PhysicalAddr(src), PhysicalAddr(dst),
+               64 - 1 /* DMA_SIZE(64, 1) */);
+    rspq_wait();
+    data_cache_hit_invalidate(dst, sizeof(dst));
+    int bad = -1;
+    for (int i = 0; i < 64; i++) {
+        if (dst[i] != (uint8_t)(src[i] + 1)) { bad = i; break; }
+    }
+    if (bad < 0)
+        debugf("[RSPAUDIO] selftest OK\n");
+    else
+        debugf("[RSPAUDIO] selftest FAIL at %d: got %02x want %02x\n",
+               bad, dst[bad], (uint8_t)(src[bad] + 1));
+}
 
 uint8_t keystate[256];
 
@@ -26,6 +55,10 @@ extern char end __attribute__((section (".data")));
 static int audio_enabled = 0;
 #define AI_NUM_BUFFERS 4          // AI back buffers handed to audio_init
 
+#ifdef MVS64_RSPWP
+// rspq lost-wakeup watchdog kicks (see plat_audio_pump).
+static uint32_t rspwp_wedge_kicks;
+#endif
 // Consecutive pump passes that observed ISR silence-padding (the overload
 // governor input, see plat_audio_pump).
 static int underrun_streak;
@@ -98,8 +131,11 @@ void plat_init(int audiofreq, int fps) {
     rdpq_init();
     // rdpq_debug_start();
 
-    // Register our custom RSP overlay into the RSP queue engine
+    // Register our custom RSP overlays into the RSP queue engine
     RSP_OVL_ID = rspq_overlay_register(&rsp_video);
+    RSP_AUDIO_OVL_ID = rspq_overlay_register(&rsp_audio);
+    RSP_FM_OVL_ID = rspq_overlay_register(&rsp_fm);
+    rsp_audio_selftest();
 
     audio_init(audiofreq, AI_NUM_BUFFERS);
     // ORDER MATTERS: register the callback BEFORE the priming write. The AI
@@ -145,9 +181,88 @@ static void aring_push(const int16_t *src, int n) {
 
 static int16_t stage[2048 * 2];
 
+
+#ifdef MVS64_RSPWP
+// Cross-pump output deferral (whole-pump offload).
+// sound_gen_samples() now returns with its tail RSP chunks still in flight;
+// publishing `stage` to the ring is deferred to the NEXT pump entry, so the
+// RSP burst deficit drains for free during the inter-pump 68k/draw window
+// instead of being paid as a blocking wait at pump end. The fill policy
+// counts the pending buffer as staged lead (it is published before the ISR
+// could ever need it), and a safety valve publishes immediately whenever
+// less than one AI callback of PUBLISHED lead remains.
+void YM2610_wp_finish(void);
+static int wp_pending_n;       // frames generated into stage, not yet published
+static void wp_publish(void) {
+    extern uint32_t profile_snd;
+    uint32_t t0;
+    if (!wp_pending_n) return;
+    t0 = TICKS_READ();
+    YM2610_wp_finish();        // usually instant: the RSP had the whole window
+    profile_snd += TICKS_DISTANCE(t0, TICKS_READ());
+    aring_push(stage, wp_pending_n);
+    wp_pending_n = 0;
+}
+#endif
+
 void plat_audio_pump(void) {
     if (!audio_enabled) return;
 
+#if defined(MVS64_RSPWP) && defined(MVS64_WP_DEATHTEST)
+    // Revive-cycle gate rig, thrash edition (2026-08-30 permanent-loss
+    // postmortem): 8 forced dead-latches ~10s apart starting at pass 3600
+    // (~60s at speed), i.e. every kill lands <30s after the previous
+    // revive. The old bookkeeping exhausted its 6-attempt budget with no
+    // restore path and stayed dead for the session; the fixed bookkeeping
+    // must ride the thrash (parole retries) and, once the kills stop,
+    // return to sustained health (off=0, budget restored) by run end.
+    {
+        extern void YM2610_offload_testkill(void);
+        static int dt_passes;
+        dt_passes++;
+        if (dt_passes >= 3600 && dt_passes <= 7800
+            && (dt_passes - 3600) % 600 == 0)
+            YM2610_offload_testkill();
+    }
+#endif
+
+#ifdef MVS64_RSPWP
+    // rspq lost-wakeup watchdog. The whole-pump audio offload issues bursts
+    // of commands separated by idle gaps (~500 halt/wake edges per second),
+    // which hits a race in the rspq kernel's going-idle path: the RSP halts
+    // just as the CPU sets SIG_MORE, and stays halted with work pending
+    // (observed three times as "RSP CRASH ... display_get wait loop timed
+    // out", RSP halted at kernel PC 0x18 with SIG_MORE set — on both the
+    // highpri and lowpri queues). Halted+SIG_MORE is legal only for the
+    // few-cycle window inside libdragon's own wake sequence, so if it
+    // persists across two pump calls (~30-70ms, still well under
+    // display_get's 200ms panic), clear the halt: that resumes the kernel's
+    // idle loop, which re-checks SIG_MORE and proceeds. A spurious kick in
+    // the benign window is a no-op (the CPU's own clear-halt follows).
+    {
+        volatile uint32_t * const SP_STATUS_REG =
+            (volatile uint32_t *) 0xA4040010;
+        static int wedged_seen;
+        uint32_t st = *SP_STATUS_REG;
+        if ((st & 1u /*HALTED*/) && (st & (1u << 14) /*SIG_MORE*/)) {
+            if (wedged_seen++) {
+                *SP_STATUS_REG = 1u /*SP_WSTATUS_CLEAR_HALT*/;
+                wedged_seen = 0;
+                rspwp_wedge_kicks++;
+                debugf("[RSPWP] rspq lost-wakeup kicked (%lu)\n",
+                       (unsigned long) rspwp_wedge_kicks);
+            }
+        } else {
+            wedged_seen = 0;
+        }
+    }
+#endif
+#ifdef MVS64_RSPWP
+    // Publish the previous pump's deferred buffer first: its chunks have had
+    // the whole inter-pump window to complete, so the blocking finish inside
+    // is normally a no-op poll.
+    wp_publish();
+#endif
     const int buflen = audio_get_buffer_length();
     const int n = buflen <= 2048 ? buflen : 2048;
     // Ring headroom kept staged ahead of the ISR. Two buffers (~80ms @11kHz)
@@ -190,11 +305,21 @@ void plat_audio_pump(void) {
     extern uint32_t profile_snd;
     while (filled < pass_budget) {
         uint32_t lead = aring_wr - aring_rd;
+#ifdef MVS64_RSPWP
+        lead += (uint32_t)wp_pending_n;   // deferred buffer counts as staged
+#endif
         if (lead + (uint32_t)n > TARGET_LEAD) break;   // topped up
+#ifdef MVS64_RSPWP
+        wp_publish();          // free the staging buffer before reusing it
+#endif
         uint32_t snd_t0 = TICKS_READ();
         sound_gen_samples(stage, n);
         profile_snd += TICKS_DISTANCE(snd_t0, TICKS_READ());
+#ifdef MVS64_RSPWP
+        wp_pending_n = n;      // defer the publish to the next pump entry
+#else
         aring_push(stage, n);
+#endif
         filled++;
     }
 
@@ -226,12 +351,57 @@ void plat_audio_pump(void) {
         last_t = now;
         last_rd = rd_now;
         if (filled == 0 && wall_due >= 2 * n) {
+#ifdef MVS64_RSPWP
+            wp_publish();      // free the staging buffer before reusing it
+#endif
             uint32_t snd_t0 = TICKS_READ();
             sound_gen_samples(stage, n);
+#ifdef MVS64_RSPWP
+            // discard buffer: complete in-flight chunks before stage reuse,
+            // but never publish (the platform's AI is broken here anyway)
+            YM2610_wp_finish();
+#endif
             profile_snd += TICKS_DISTANCE(snd_t0, TICKS_READ());
             wall_due -= n;
         }
     }
+
+#ifdef MVS64_RSPWP
+    // Safety valve: with less than one full AI callback of PUBLISHED lead,
+    // the deferred buffer cannot wait for the next pump entry (a slow frame
+    // would starve the ISR into a silence pad). Publish now — this pays the
+    // residual RSP deficit exactly when we're already behind, which is the
+    // old (pre-deferral) behavior.
+    if (wp_pending_n && aring_wr - aring_rd < (uint32_t)n)
+        wp_publish();
+#endif
+
+#if defined(MVS64_RSPWP) && defined(MVS64_RSPQ_WEDGETEST)
+    // Fault-injection rig for the rspq highpri wedge (the 2026-09-23 hardware
+    // crash; see patches/libdragon-rspq-highpri-wedge.patch). Every 300th pump
+    // from pass 900 on, let this pump's audio burst drain, then raise a stale
+    // SIG_HIGHPRI_REQUESTED: exactly the state the upstream highpri_begin race
+    // leaves behind. (Injected while segments are still queued, their own
+    // WRITE_STATUS would consume it: the first rig, 2026-09-23, stuck only 1
+    // of 5 times.) The kernel then re-enters highpri at the empty end of the
+    // stream and sleeps there with SIG_HIGHPRI_RUNNING set, starving lowpri.
+    // Unpatched toolchain: the next lowpri wait times out into the crash
+    // screen (reproduced in ares: the exact hardware signature, rspq.c:951,
+    // STATUS 0x1403). Patched: the wait-loop watchdog recovers it and play
+    // continues.
+    {
+        static uint32_t wt_passes, wt_injected;
+        if (++wt_passes >= 900 && (wt_passes % 300) == 0) {
+            rspq_highpri_sync();
+            MEMORY_BARRIER();
+            *SP_STATUS = SP_WSTATUS_SET_SIG4;   // = SET_SIG_HIGHPRI_REQUESTED
+            MEMORY_BARRIER();
+            wt_injected++;
+            debugf("[WEDGETEST] stale HIGHPRI_REQUESTED injected (%lu)\n",
+                   (unsigned long) wt_injected);
+        }
+    }
+#endif
 }
 
 int plat_poll(void) {

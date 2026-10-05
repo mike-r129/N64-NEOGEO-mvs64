@@ -49,6 +49,25 @@ like 64drive or EverDrive 64.
 a ROM called `sfix.sfix`, which is also part of the standard BIOS sets. That
 ROM must reside in the same folder of the specified BIOS.
 
+#### libdragon patches (RSP audio offload)
+
+The sound emulation runs the YM2610 synthesis on the RSP, issuing hundreds of
+short high-priority rspq segments per second. That load hits two races in
+libdragon's rspq that wedge the RSP on real hardware (the RSP sleeps with work
+pending, and the next wait times out into the crash screen). Until the fixes
+are merged into libdragon, apply the patches in `patches/` to the libdragon
+source tree you build from (with libdragon-docker, the `libdragon/` folder
+of this repository), then rebuild and reinstall libdragon:
+
+	$ cd libdragon
+	$ patch -p1 < ../patches/libdragon-rspq-closed-loop-flush.patch
+	$ patch -p1 < ../patches/libdragon-rspq-highpri-wedge.patch
+	$ cd .. && libdragon install
+
+Each patch file describes the race it fixes. To build without the RSP audio
+offload (all synthesis on the CPU, much slower), add `ADPCM_CPU=1 WP_OFF=1`
+to the `make mvs64` command line.
+
 ### How to build the PC version of mvs64
 
 mvs64 also includes a PC build of the emulator that can be used to further

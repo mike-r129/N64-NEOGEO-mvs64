@@ -4,7 +4,8 @@
 // m.rom driver and the MAME YM2610 core (ym2610/). Memory map, bank switching
 // and I/O port layout follow the NeoGeo hardware (cross-checked against
 // gngeo). sound_gen_samples steps the Z80 in cycle-proportional slices and
-// synthesizes the YM2610 output between them.
+// synthesizes the YM2610 output between them; on N64 the FM and ADPCM
+// synthesis runs on the RSP (the whole-pump offload in ym2610.c).
 #include "sound.h"
 #include "emu.h"
 #include "roms.h"
@@ -82,7 +83,9 @@ static inline int z80_snap_eq(const struct z80snap *a, const struct z80snap *b) 
 }
 
 // YM2610 stream output (interleaved s16 L/R), filled by YM2610Update_stream()
-// and copied out by emit().
+// and copied out by emit() on the PC and WP_OFF=1 builds. Whole-pump N64
+// builds write the AI staging buffer directly (ym2610_wp_dest_base) and never
+// touch it.
 uint16_t play_buffer[16384];
 
 // Resident ADPCM sample ROMs (v.rom, and vb.rom for sets with a separate
@@ -407,8 +410,25 @@ uint8_t sound_read_status(void) {
 }
 
 static void emit(int16_t *out, int from, int count) {
+#if defined(N64) && defined(MVS64_RSPWP)
+	/* Whole-pump deferred FM: deferred chunks write their final samples
+	 * straight into this span at collect time, and non-WP chunks pack
+	 * theirs directly in pass 4 (track C step 4); everything is complete
+	 * before sound_gen_samples returns the buffer — see YM2610_wp_finish. */
+	ym2610_wp_dest_base = out + from * 2;
 	YM2610Update_stream(count);
+	ym2610_wp_dest_base = NULL;
+#else
+	YM2610Update_stream(count);
+#endif
 #ifdef N64
+#ifdef MVS64_RSPWP
+	/* Track C step 4 (emit-copy elision): Update_stream packed the non-WP
+	 * chunks straight into this span (same u32 big-endian pack the collect
+	 * uses); WP chunks land at collect. play_buffer is no longer read here
+	 * (the snd_dbg [SND] s0 probe below goes stale on this path). */
+	YM2610_wp_mark_emitted();
+#else
 	// `out` is an UNCACHED AI buffer: every store is a separate RDRAM
 	// transaction, so pack each stereo frame into ONE 32-bit store (big-endian:
 	// high half = left = out[0]) — halves the uncached traffic vs two 16-bit
@@ -418,6 +438,7 @@ static void emit(int16_t *out, int from, int count) {
 		for (int i = 0; i < count; i++)
 			dst[i] = ((uint32_t)play_buffer[i * 2 + 0] << 16) | play_buffer[i * 2 + 1];
 	}
+#endif
 #else
 	for (int i = 0; i < count; i++) {
 		out[(from + i) * 2 + 0] = (int16_t)play_buffer[i * 2 + 0];
@@ -553,6 +574,15 @@ int sound_gen_samples(int16_t *out, int nsamples) {
 	}
 	if (produced < nsamples && !silent) emit(out, produced, nsamples - produced);
 
+#if defined(N64) && defined(MVS64_RSPWP)
+	/* Cross-pump deferral (whole pump): tail chunks may still be in flight
+	 * when we return — `out` is the platform's staging buffer, and the
+	 * platform pump blocks on YM2610_wp_finish() before publishing it to
+	 * the pull ring (usually at its NEXT entry, after the inter-pump 68k
+	 * window has drained the RSP for free). NOTE: the [SNDRMS] probe below
+	 * reads the tail spans before they are final — diagnostic only. */
+	YM2610_wp_finish_async();
+#endif
 
 	if (snd_dbg)
 		plat_log("[SND] z80 pc=%04x code=%02x result=%02x timers=%d%d s0=%d\n",
