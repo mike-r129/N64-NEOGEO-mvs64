@@ -109,7 +109,7 @@ endif
 # loops than the icache saves).
 
 ROMNAME=$(notdir $(basename $(ROM)))
-ROMDIR=$(ROM:%.zip=%.n64)
+ROMDIR=$(basename $(ROM)).n64
 
 all: mvsmakerom mvs64-${ROMNAME}.z64
 

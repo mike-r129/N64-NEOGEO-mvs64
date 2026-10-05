@@ -68,11 +68,13 @@ Now build mvs64:
 	$ make mvs64 BIOS=<path/to/bios.bin> ROM=<path/to/game.zip>
 
 When building, you need to specify the path to a NeoGeo BIOS file that you
-want to use, and the path to a NeoGeo game ROM, as a zip file. Both `BIOS` and
+want to use, and the path to a NeoGeo game ROM: a MAME-style zip, a `.neo`
+file (the NeoSD format), or a zip containing a `.neo` file. Both `BIOS` and
 `ROM` are actually environment variables, so you can set them in your environment
 once to avoid specifying them on the command line (doing that for `BIOS` is
-especially useful, as you rarely change that). ROM and BIOS files are not
-included in this repository.
+especially useful, as you rarely change that). The paths cannot contain
+spaces, so rename a file like `Metal Slug - Super Vehicle-001.zip` to
+`mslug.zip` first. ROM and BIOS files are not included in this repository.
 
 This command will create a Nintendo 64 ROM called `mvs64-<gamename>.z64`, that
 you can use with an emulator or on a real console using a flash cart like
@@ -137,6 +139,8 @@ To find the loops of a new game, build with `EXTRA_DEFINES=-DMVS64_IDLEPROBE`.
 The log then prints `[IDLEPROBE] long spin at 68k pc=...` for every branch
 target that runs thousands of times in a row. Check the disassembly at that
 address, and if it is a pure poll, add it to the game's row in `mvsmakerom.c`.
+Long bounded loops (a `dbra` that clears RAM or fills video memory) show up
+too; they are not waits and must not be added.
 
 ### Diagnostics
 
@@ -216,7 +220,7 @@ Changes in this fork are checked against builds without them:
 | Game | NGH | Boots | Gameplay | Sound | Notes |
 | --- | --- | --- | --- | --- | --- |
 | Samurai Shodown II | 063 | Yes | Yes | Yes | The test game: 60 fps attract in ares; fights about 42-50 fps on hardware |
-| Metal Slug | 201 | ? | ? | ? | Idle-skip address from the original MVS64 list, not tested |
+| Metal Slug | 201 | Yes | Yes | Yes | Tested from a `.neo` set. Plays on PC; in ares about 8 fps in attract and 17-18 in the first mission. Its sound driver keeps the Z80 busy about half the time (samsho2's: about 5%), and interpreting that takes most of the N64 CPU. No idle-skip entry: its main-loop wait counts its passes |
 
 Other games have not been tested since sound was added.
 
