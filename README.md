@@ -220,7 +220,7 @@ Changes in this fork are checked against builds without them:
 | Game | NGH | Boots | Gameplay | Sound | Notes |
 | --- | --- | --- | --- | --- | --- |
 | Samurai Shodown II | 063 | Yes | Yes | Yes | The test game: 60 fps attract in ares; fights about 42-50 fps on hardware |
-| Metal Slug | 201 | Yes | Yes | Yes | Tested from a `.neo` set. Plays on PC; in ares about 8 fps in attract and 17-18 in the first mission. Its sound driver keeps the Z80 busy about half the time (samsho2's: about 5%), and interpreting that takes most of the N64 CPU. No idle-skip entry: its main-loop wait counts its passes |
+| Metal Slug | 201 | Yes | Yes | Yes | Tested from a `.neo` set. Plays on PC. In ares: about 31 fps in attract, but only about 10 fps in the first mission, where emulating its sound driver takes about 1.7 seconds of N64 time per second of audio, so sound falls behind real time and is muted by the overload governor. The driver keeps the Z80 busy about half the time (samsho2's: about 5%). No idle-skip entry: its main-loop wait counts its passes |
 
 Other games have not been tested since sound was added.
 
