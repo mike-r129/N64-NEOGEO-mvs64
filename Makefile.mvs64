@@ -22,6 +22,14 @@ else
 src = $(core_src) m64k/m64k.c m64k/tlb.c
 asm = hw_n64.S m64k/m64k_asm.S
 CFLAGS += -DUSE_M64K
+# Inline stores to the LSPC VRAM ports (0x3C0000/2/4) in the hot MOVE.w and
+# MOVE.l fast paths, so those writes skip the TLB trap. Game builds only
+# (references lspc.c's registers and VIDEO_RAM). make ... PORTSTORE_OFF=1
+# builds it out.
+ifndef PORTSTORE_OFF
+ASFLAGS += -DM64K_PORTSTORE
+N64_ASFLAGS += -DM64K_PORTSTORE
+endif
 # Inline fast paths for the most frequent opcode forms (Bcc/DBcc, RTS,
 # common MOVE.b/.w/.l forms, ADDQ/SUBQ/CMPI/ADD/TST on simple operands).
 # Covered by the m64k testsuite, which builds with the same define.

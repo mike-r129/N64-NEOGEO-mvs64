@@ -13,6 +13,10 @@
 #if defined(M64K_FASTPATHS) && (M64K_CONFIG_TIMING_ACCURACY >= 1)
 #undef M64K_FASTPATHS
 #endif
+# The inline LSPC port stores (M64K_PORTSTORE) live in the fast paths.
+#if defined(M64K_PORTSTORE) && !defined(M64K_FASTPATHS)
+#undef M64K_PORTSTORE
+#endif
 
 # When set to 1, most MIPS registers will be set to random values at start.
 # This is useful when running the testsuite, to verify that the code does not
@@ -322,6 +326,24 @@ opshiftsmem:
         .error "sh_m68k: register used to store into m68k memory must be 'result'"
     .endif
     sh result, 0(\address)
+.endm
+
+# "port_store_check" (game builds, M64K_PORTSTORE): placed right before the
+# sh_m68k of the hottest MOVE.w-to-memory fast paths, after their cycle
+# charge and flag update. A mapped address equal to the LSPC VRAM address /
+# data / modulo port (0x3C0000/2/4) branches to m64k_port_store, which
+# performs the hw_n64.S asm_lspc_vram_*_w update inline instead of taking
+# the TLB trap (~100 cycles each, ~1k per busy frame). Every other address,
+# the 0x3C0006+ registers and the mirrors included, stores (and traps) as
+# before. t1/t2 are dead at every use site. lui sign-extends 0xFF3C0000 the
+# same way map_m68k builds the mapped address.
+.macro port_store_check
+#ifdef M64K_PORTSTORE
+    lui t1, 0xFF3C
+    xor t1, eaptr, t1
+    sltiu t2, t1, 6
+    bnez t2, m64k_port_store
+#endif
 .endm
 
 .macro sb_m68k reg, address
@@ -2523,6 +2545,7 @@ movew_f_dst_an:                        # move.w Dn,(An)  (8 cycles)
     move flag_zc, result
     sll flag_nv, result, 16
     use_cycles 8
+    port_store_check
     sh_m68k result, eaptr
     dispatch_next
 
@@ -2558,6 +2581,7 @@ movew_f_dst_d16:                       # move.w Dn,(d16,An)  (12 cycles)
     move flag_zc, result
     sll flag_nv, result, 16
     use_cycles 12
+    port_store_check
     sh_m68k result, eaptr
     dispatch_next
 
@@ -2589,6 +2613,7 @@ movew_fsrc_other:
     move flag_zc, result
     sll flag_nv, result, 16
     use_cycles 12
+    port_store_check
     sh_m68k result, eaptr
     dispatch_next
 
@@ -2611,6 +2636,7 @@ movew_imm_d16:                         # ---- move.w #imm,(d16,An)  (16 cycles) 
     move flag_zc, result
     sll flag_nv, result, 16
     use_cycles 16
+    port_store_check
     sh_m68k result, eaptr
     dispatch_next
 
@@ -2648,8 +2674,69 @@ movew_fsrc_anp:
     move flag_zc, result
     sll flag_nv, result, 16
     use_cycles 4
+    port_store_check
     sh_m68k result, eaptr
     dispatch_next
+#ifdef M64K_PORTSTORE
+# port_store_check target: t1 = port offset (0 address, 2 data, 4 modulo),
+# result = the value the trapping sh would have stored (hw_n64.S `value`).
+# Same updates, in the same order, as asm_lspc_vram_{data,addr,modulo}_w.
+m64k_port_store:
+    xori t2, t1, 2
+    bnez t2, 1f
+    lhu t1, %gprel(reg_vram_addr)(gp)  # ---- data port (hottest) ----
+    lw t2, %gprel(reg_vram_bank)(gp)
+    addu t2, t1
+    addu t2, t1
+    sh result, 0(t2)
+    lhu t2, %gprel(reg_vram_mod)(gp)
+    addu t1, t2
+    lhu t2, %gprel(reg_vram_mask)(gp)
+    and t1, t2
+    sh t1, %gprel(reg_vram_addr)(gp)
+    dispatch_next
+1:  bnez t1, 4f                        # ---- address port ----
+    andi t2, result, 0x8000
+    bnez t2, 2f
+    la t2, VIDEO_RAM
+    li t1, 0x7FFF
+    j 3f
+2:  la t2, VIDEO_RAM + 0x8000*2
+    li t1, 0x7FF
+3:  sw t2, %gprel(reg_vram_bank)(gp)
+    sh t1, %gprel(reg_vram_mask)(gp)
+    and t1, result
+    sh t1, %gprel(reg_vram_addr)(gp)
+    dispatch_next
+4:  sh result, %gprel(reg_vram_mod)(gp)  # ---- modulo port ----
+    dispatch_next
+
+# MOVE.l to 0x3C0000 (movel_slow): what the SWL+SWR trap pair does - the
+# high word to the address port (asm_lspc_vram_addr_w), then the low word
+# to the data port (asm_lspc_vram_data_w), in that order.
+m64k_port_store_l:
+    srl t0, result, 16                 # SWL value: the high word
+    andi t2, t0, 0x8000
+    bnez t2, 1f
+    la t2, VIDEO_RAM
+    li t1, 0x7FFF
+    j 2f
+1:  la t2, VIDEO_RAM + 0x8000*2
+    li t1, 0x7FF
+2:  sw t2, %gprel(reg_vram_bank)(gp)
+    sh t1, %gprel(reg_vram_mask)(gp)
+    and t1, t0                         # t1 = new VRAM address, t2 = bank
+    sh t1, %gprel(reg_vram_addr)(gp)
+    addu t2, t1                        # data port with the low word
+    addu t2, t1
+    sh result, 0(t2)
+    lhu t2, %gprel(reg_vram_mod)(gp)
+    addu t1, t2
+    lhu t2, %gprel(reg_vram_mask)(gp)
+    and t1, t2
+    sh t1, %gprel(reg_vram_addr)(gp)
+    j main_loop
+#endif
 movew_fanp_dn:                         # ---- move.w (An)+,Dn  (8 cycles) ----
     andi t1, opcode, 7
     sll t1, 2
@@ -2812,6 +2899,12 @@ OP(movel):
     andi t0, opcode, 7<<3           # isolate EA-destination mode
     xori t0, 4<<3                   # check if it's pre-decrement mode
     beqz t0, 1f                     # if so, write memory in reversed order
+#ifdef M64K_PORTSTORE
+    # MOVE.l to the address port: address write + data write, the shape of
+    # typical VRAM upload loops (two traps per instruction otherwise).
+    lui t1, 0xFF3C
+    beq eaptr, t1, m64k_port_store_l  # MOVE.l to 0x3C0000 (standard order only)
+#endif
     .set noreorder
     swl result, 0(eaptr)            # standard order: SWL+SWR
     j main_loop
