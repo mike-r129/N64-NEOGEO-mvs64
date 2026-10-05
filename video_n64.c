@@ -11,6 +11,15 @@ static void rsp_fix_draw(uint8_t *src, int palnum, int x, int y) {
 	rspq_write(RSP_OVL_ID, 0x1, PhysicalAddr(src),
 		(palnum << 20) | (x << 10) | y);
 }
+// Flush the queue every MVS64_DRAW_FLUSH_EVERY sprite commands so the
+// RSP/RDP start drawing while the CPU is still issuing the frame. rspq only
+// hands commands to the RSP on a flush; with libdragon's 2 KB lowpri buffers
+// every buffer switch flushed implicitly (~every 128 tiles), but with larger
+// buffers (MVS64_RSPQ_LOWPRI_WORDS) nothing flushed until render_end,
+// serializing CPU issue and RSP/RDP execution.
+#ifndef MVS64_DRAW_FLUSH_EVERY
+#define MVS64_DRAW_FLUSH_EVERY 64
+#endif
 
 // 2-word sprite command (cmd_sprite_draw2): the C-ROM pixel slot instead of
 // its address, plus the walk record fields as they are. w0's bits 20..29 are
@@ -22,6 +31,7 @@ static void rsp_fix_draw(uint8_t *src, int palnum, int x, int y) {
 // and the same order guarantee as rspq_write (the header word can never be
 // visible without its argument). render_begin_sprites pads the queue to 8
 // bytes with cmd_nop; a misaligned pointer still takes the two-store path.
+static int draw_since_flush;
 static inline void rsp_sprite_draw2(uint32_t slot, uint32_t w0, uint32_t w1) {
 	uint32_t word0 = (RSP_OVL_ID + (0x7 << 24)) | (slot << 10) | ((w0 >> 20) & 0x3FF);
 	volatile uint32_t *p = rspq_cur_pointer;
@@ -34,6 +44,10 @@ static inline void rsp_sprite_draw2(uint32_t slot, uint32_t w0, uint32_t w1) {
 	rspq_cur_pointer = p + 2;
 	if (__builtin_expect(rspq_cur_pointer > rspq_cur_sentinel, 0))
 		rspq_next_buffer();
+	if (MVS64_DRAW_FLUSH_EVERY && ++draw_since_flush >= MVS64_DRAW_FLUSH_EVERY) {
+		draw_since_flush = 0;
+		rspq_flush();
+	}
 }
 static void rsp_pal_convert(uint16_t *src, uint16_t *dst) {
 	rspq_write(RSP_OVL_ID, 0x3, PhysicalAddr(src), PhysicalAddr(dst));

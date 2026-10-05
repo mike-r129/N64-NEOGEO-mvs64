@@ -62,9 +62,12 @@ of this repository), then rebuild and reinstall libdragon:
 	$ cd libdragon
 	$ patch -p1 < ../patches/libdragon-rspq-closed-loop-flush.patch
 	$ patch -p1 < ../patches/libdragon-rspq-highpri-wedge.patch
+	$ patch -p1 < ../patches/libdragon-rspq-lowpri-size.patch
 	$ cd .. && libdragon install
 
-Each patch file describes the race it fixes. To build without the RSP audio
+The first two fix the races; the third lets mvs64 enlarge the rspq lowpri
+command buffers (a busy frame issues ~10 KB of video commands), and without it
+the buffers keep libdragon's default size. To build without the RSP audio
 offload (all synthesis on the CPU, much slower), add `ADPCM_CPU=1 WP_OFF=1`
 to the `make mvs64` command line.
 
