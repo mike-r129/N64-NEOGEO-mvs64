@@ -1,8 +1,8 @@
-// Diagnostic overlays for N64 builds: the PERFOSD hardware perf overlay
-// and the text renderer it shares with SNDOSD (whose body stays in
-// platform_n64.c next to the audio ring it reads). Every block here is
-// compiled only in those diagnostic builds, so the release image does
-// not change.
+// Diagnostic overlays and the pixel gate for N64 builds: the PERFOSD
+// hardware perf overlay, the text renderer it shares with SNDOSD (whose
+// body stays in platform_n64.c next to the audio ring it reads), and the
+// FBCRC framebuffer hash. Every block here is compiled only in those
+// diagnostic builds, so the release image does not change.
 #include <libdragon.h>
 #include <stdio.h>
 #include "platform.h"
@@ -69,6 +69,24 @@ void osd_text(uint16_t *fb, int stride_px, int x, int y, const char *s) {
 			}
 		}
 	}
+}
+#endif
+
+#if defined(MVS64_FBCRC) || defined(MVS64_FBCRC_PIPE)
+// FNV-1a over the visible 320x224 region of a finished frame, read uncached
+// (the RDP wrote RDRAM behind the CPU cache).
+uint32_t osd_fb_crc(const surface_t *disp) {
+	uint32_t crc = 0x811C9DC5u;
+	const uint8_t *row = (const uint8_t *)UncachedAddr(disp->buffer);
+	for (int y = 0; y < 224; y++) {
+		const uint32_t *p = (const uint32_t *)row;
+		for (int x = 0; x < 320*2/4; x++) {
+			crc ^= p[x];
+			crc *= 16777619u;
+		}
+		row += disp->stride;
+	}
+	return crc;
 }
 #endif
 

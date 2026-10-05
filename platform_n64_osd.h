@@ -9,6 +9,10 @@
 void osd_text(uint16_t *fb, int stride_px, int x, int y, const char *s);
 #endif
 
+#if defined(MVS64_FBCRC) || defined(MVS64_FBCRC_PIPE)
+uint32_t osd_fb_crc(const surface_t *disp);
+#endif
+
 #ifdef MVS64_PERFOSD
 extern uint32_t posd_wait;   // plat_beginframe adds its display_get wait here
 void perfosd_endframe(void);

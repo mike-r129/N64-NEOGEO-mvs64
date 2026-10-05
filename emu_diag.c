@@ -18,6 +18,30 @@ extern m64k_t m64k;
 #endif
 
 void emu_diag_frame(void) {
+	#ifdef M64K_TRACECRC
+	{
+		// Per-frame 68k state-trace hash (m64k.c): two runs of the same
+		// build and inputs must emit identical [TRCRC] streams, and so must
+		// two builds that differ only in a change meant to keep 68k
+		// execution identical.
+		extern uint32_t __m64k_tracecrc, __m64k_tracecrc_slices;
+		framef("[TRCRC] f=%d crc=%08lx slices=%lu\n", g_frame,
+			(unsigned long)__m64k_tracecrc,
+			(unsigned long)__m64k_tracecrc_slices);
+		__m64k_tracecrc = 2166136261u;
+		__m64k_tracecrc_slices = 0;
+		#ifdef M64K_TRCRC_SPLIT
+		{
+			// Content-only hash (regs/SR, no pc/cycles): separates
+			// timing displacement from real state divergence.
+			extern uint32_t __m64k_tracecrc_content;
+			framef("[TRCCON] f=%d crc=%08lx\n", g_frame,
+				(unsigned long)__m64k_tracecrc_content);
+			__m64k_tracecrc_content = 2166136261u;
+		}
+		#endif
+	}
+	#endif
 	#ifdef MVS64_PERFCOUNT
 	{
 		// Diagnostic counters (m64k_asm.S / hw_n64.S): executed 68k

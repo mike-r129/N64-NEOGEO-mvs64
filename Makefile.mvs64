@@ -48,6 +48,12 @@ CFLAGS += -DM64K_FASTPATHS
 ASFLAGS += -DM64K_FASTPATHS
 N64_ASFLAGS += -DM64K_FASTPATHS
 endif
+# Deterministic per-slice 68k state hash printed per frame ([TRCRC]): the
+# state gate for m64k changes (equal streams = identical 68k execution).
+# Opt-in: make ... TRCRC_ON=1.
+ifdef TRCRC_ON
+CFLAGS += -DM64K_TRACECRC
+endif
 endif
 obj = $(src:%.c=$(BUILD_DIR)/%.o) $(asm:%.S=$(BUILD_DIR)/%.o) $(rsp:%.S=$(BUILD_DIR)/%.o)
 

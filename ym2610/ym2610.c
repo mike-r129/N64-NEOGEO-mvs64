@@ -3248,6 +3248,12 @@ static int rspwp_dead2;   /* tentative; defined with the WP section below */
  * instead of a per-byte fetch. The first byte of every run still goes
  * through ym2610_vrom_fetch, so window refills happen at exactly the same
  * addresses as a per-byte loop would. */
+#ifdef MVS64_STAGE_VERIFY
+/* -DMVS64_STAGE_VERIFY checks every staged run against a direct vrom_read
+ * ([STAGEV] counts). */
+void vrom_read(uint32_t offset, uint8_t *buf, int len);
+unsigned long stagev_runs, stagev_bad;
+#endif
 static u32 rspa_stage(int win, u32 now_addr, u32 nib, u8 *dst,
 		const u8 *resident, u32 size) {
 	u32 a0b = (now_addr + 1) >> 1;
@@ -3271,6 +3277,14 @@ static u32 rspa_stage(int win, u32 now_addr, u32 nib, u8 *dst,
 			} else {
 				n = 1;   /* fetch_slow had nothing to load */
 			}
+#ifdef MVS64_STAGE_VERIFY
+			{
+				static u8 vbuf[YM2610_VWIN_SIZE];
+				vrom_read(a, vbuf, (int)n);
+				stagev_runs++;
+				if (memcmp(vbuf, dst + k, n)) stagev_bad++;
+			}
+#endif
 		}
 		k += n;
 	}

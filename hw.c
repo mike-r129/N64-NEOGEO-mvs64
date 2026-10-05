@@ -102,11 +102,11 @@ uint32_t read_pbrom(uint32_t addr, int sz) {
 	return *rom;
 }
 
-uint32_t read_hwio(uint32_t addr, int sz)  {
+static uint32_t read_hwio_impl(uint32_t addr, int sz)  {
 	if (sz == 4) {
 		// NOTE: order is important
-		uint32_t val = read_hwio(addr+0, 2) << 16;
-		return val | read_hwio(addr+2, 2);
+		uint32_t val = read_hwio_impl(addr+0, 2) << 16;
+		return val | read_hwio_impl(addr+2, 2);
 	}
 
 	// Idle skip for RTC Wait Pulse in BIOS boot
@@ -143,6 +143,46 @@ uint32_t read_hwio(uint32_t addr, int sz)  {
 
 	// debugf("[HWIO] unknown read%d: %06x\n", sz*8, (unsigned int)addr);
 	return 0xFFFFFFFF;
+}
+
+uint32_t read_hwio(uint32_t addr, int sz)  {
+	uint32_t v = read_hwio_impl(addr, sz);
+#ifndef N64
+	{
+		extern int printf(const char *, ...);
+		extern char *getenv(const char *);
+		static int log = -1;
+		if (log < 0) log = getenv("MVS64_IOLOG") ? 1 : 0;
+		if (log) printf("[IO] pc=%06x a=%06x v=%04x\n", (unsigned)emu_pc(), (unsigned)addr, (unsigned)(v & 0xFFFF));
+	}
+#endif
+#if defined(N64) && defined(MVS64_IOLOG_N64)
+	// Divergence instrument: log MMIO reads (addr, value, frame). Two
+	// builds' [IO] streams diff at the exact access that misreads a
+	// cycle-derived register (raster/timer), which a TRCRC mismatch alone
+	// cannot localize.
+	{
+		// Volume filter: only registers whose VALUE depends on the
+		// mid-instruction clock or cross-chip timing can be the FIRST
+		// divergent read (raster/timer 0x3Cxxxx, Z80 reply 0x32xxxx).
+		// Input ports are frame-deterministic. Unfiltered logging
+		// (~230 reads/frame in BIOS) throttled ares to ~2 fps and the
+		// run never reached the divergence frame.
+		unsigned bank = (addr >> 16) & 0xFF;
+		extern int g_frame;
+		// Frame gate (threshold = the MVS64_IOLOG_N64 define value):
+		// streams are identical before the divergence by definition, so
+		// logging may start just before it. Logging from boot throttled
+		// ares below 5 fps and the run never reached the target frame.
+		// Keyed by GUEST frame (g_frame, emu.c), not N64_FRAME: that is
+		// the host VI count and skews with wall speed.
+		if (g_frame >= MVS64_IOLOG_N64 && (bank == 0x3C || bank == 0x32)) {
+			debugf("[IO] f=%d a=%06x v=%04x\n", g_frame,
+			       (unsigned)addr, (unsigned)(v & 0xFFFF));
+		}
+	}
+#endif
+	return v;
 }
 
 void write_hwio(uint32_t addr, uint32_t val, int sz)  {
