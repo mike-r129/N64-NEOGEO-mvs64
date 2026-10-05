@@ -55,6 +55,10 @@ extern char end __attribute__((section (".data")));
 static int audio_enabled = 0;
 #define AI_NUM_BUFFERS 4          // AI back buffers handed to audio_init
 
+#ifdef MVS64_RSPWP
+// rspq lost-wakeup watchdog kicks (see plat_audio_pump).
+static uint32_t rspwp_wedge_kicks;
+#endif
 // Consecutive pump passes that observed ISR silence-padding (the overload
 // governor input, see plat_audio_pump).
 static int underrun_streak;
@@ -223,6 +227,37 @@ void plat_audio_pump(void) {
 #endif
 
 #ifdef MVS64_RSPWP
+    // rspq lost-wakeup watchdog. The whole-pump audio offload issues bursts
+    // of commands separated by idle gaps (~500 halt/wake edges per second),
+    // which hits a race in the rspq kernel's going-idle path: the RSP halts
+    // just as the CPU sets SIG_MORE, and stays halted with work pending
+    // (observed three times as "RSP CRASH ... display_get wait loop timed
+    // out", RSP halted at kernel PC 0x18 with SIG_MORE set — on both the
+    // highpri and lowpri queues). Halted+SIG_MORE is legal only for the
+    // few-cycle window inside libdragon's own wake sequence, so if it
+    // persists across two pump calls (~30-70ms, still well under
+    // display_get's 200ms panic), clear the halt: that resumes the kernel's
+    // idle loop, which re-checks SIG_MORE and proceeds. A spurious kick in
+    // the benign window is a no-op (the CPU's own clear-halt follows).
+    {
+        volatile uint32_t * const SP_STATUS_REG =
+            (volatile uint32_t *) 0xA4040010;
+        static int wedged_seen;
+        uint32_t st = *SP_STATUS_REG;
+        if ((st & 1u /*HALTED*/) && (st & (1u << 14) /*SIG_MORE*/)) {
+            if (wedged_seen++) {
+                *SP_STATUS_REG = 1u /*SP_WSTATUS_CLEAR_HALT*/;
+                wedged_seen = 0;
+                rspwp_wedge_kicks++;
+                debugf("[RSPWP] rspq lost-wakeup kicked (%lu)\n",
+                       (unsigned long) rspwp_wedge_kicks);
+            }
+        } else {
+            wedged_seen = 0;
+        }
+    }
+#endif
+#ifdef MVS64_RSPWP
     // Publish the previous pump's deferred buffer first: its chunks have had
     // the whole inter-pump window to complete, so the blocking finish inside
     // is normally a no-op poll.
@@ -341,6 +376,32 @@ void plat_audio_pump(void) {
         wp_publish();
 #endif
 
+#if defined(MVS64_RSPWP) && defined(MVS64_RSPQ_WEDGETEST)
+    // Fault-injection rig for the rspq highpri wedge (the 2026-09-23 hardware
+    // crash; see patches/libdragon-rspq-highpri-wedge.patch). Every 300th pump
+    // from pass 900 on, let this pump's audio burst drain, then raise a stale
+    // SIG_HIGHPRI_REQUESTED: exactly the state the upstream highpri_begin race
+    // leaves behind. (Injected while segments are still queued, their own
+    // WRITE_STATUS would consume it: the first rig, 2026-09-23, stuck only 1
+    // of 5 times.) The kernel then re-enters highpri at the empty end of the
+    // stream and sleeps there with SIG_HIGHPRI_RUNNING set, starving lowpri.
+    // Unpatched toolchain: the next lowpri wait times out into the crash
+    // screen (reproduced in ares: the exact hardware signature, rspq.c:951,
+    // STATUS 0x1403). Patched: the wait-loop watchdog recovers it and play
+    // continues.
+    {
+        static uint32_t wt_passes, wt_injected;
+        if (++wt_passes >= 900 && (wt_passes % 300) == 0) {
+            rspq_highpri_sync();
+            MEMORY_BARRIER();
+            *SP_STATUS = SP_WSTATUS_SET_SIG4;   // = SET_SIG_HIGHPRI_REQUESTED
+            MEMORY_BARRIER();
+            wt_injected++;
+            debugf("[WEDGETEST] stale HIGHPRI_REQUESTED injected (%lu)\n",
+                   (unsigned long) wt_injected);
+        }
+    }
+#endif
 }
 
 int plat_poll(void) {

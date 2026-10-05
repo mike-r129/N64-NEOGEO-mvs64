@@ -41,7 +41,7 @@ N64_ASFLAGS += $(EXTRA_DEFINES)
 # pump later, so the CPU never waits per chunk. Bit-exact against the C core
 # (dual-compute gate: EXTRA_DEFINES=-DMVS64_RSPWP_VERIFY, [RSPWP] counters).
 # Measured in ares on samsho2: in-game fps roughly doubled versus the CPU
-# path.
+# path. Needs the rspq patches in patches/ (see README.md).
 # make ... ADPCM_CPU=1 WP_OFF=1 forces the C synthesis path (debug/fallback).
 ifndef ADPCM_CPU
 CFLAGS += -DMVS64_RSPADPCM
