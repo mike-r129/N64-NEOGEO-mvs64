@@ -36,6 +36,27 @@ static int  z80_active;                 // false when there is no m.rom
 #define z80_ram  z80_hot.ram    // 2KB work RAM at 0xF800-0xFFFF
 static const uint8_t *z80_bank[4];      // window base pointers into M_ROM
 
+// MVS64_Z80TRACE (PC diagnostic): record every owner action on the Z80 to a
+// file for core replay tests; see z80trace.h and tools/z80trace-format.md.
+// The hooks below compile away in normal builds.
+#ifdef MVS64_Z80TRACE
+static void ztr_irq(int level);
+static void ztr_genint(uint8_t data);
+static void ztr_nmi(void);
+static void ztr_setcyc(void);
+static void ztr_setr(void);
+static void ztr_bank(int window);
+static unsigned ztr_run(unsigned long until, uint16_t *last_pc);
+static void ztr_step(void);
+#define ZTR(x) x
+#define Z80_RUN(until, last_pc) ztr_run(until, last_pc)
+#define Z80_STEP() ztr_step()
+#else
+#define ZTR(x)
+#define Z80_RUN(until, last_pc) z80_run(&cpu, until, last_pc)
+#define Z80_STEP() z80_step(&cpu)
+#endif
+
 static uint8_t sound_code;              // 68k -> Z80 command latch
 static uint8_t result_code;             // Z80 -> 68k reply latch
 static uint8_t pending_command;
@@ -229,6 +250,7 @@ static int ym_irq_level;
 static int g_irq_redeliver;                 // level-triggered re-asserts (see above)
 #endif
 static void ym_irq_handler(int irq) {
+	ZTR(ztr_irq(irq));
 	ym_irq_level = irq;
 	cpu.irq_line = irq;                     // z80_run re-asserts while high
 	if (irq) z80_gen_int(&cpu, 0xff);       // assert (IM1 -> RST 38h)
@@ -240,6 +262,7 @@ static void ym_irq_handler(int irq) {
 // entering the handler right now. Call before stepping in every Z80 run loop.
 static inline void z80_service_level_irq(void) {
 	if (ym_irq_level && cpu.iff1 && !cpu.int_pending) {
+		ZTR(ztr_genint(0xff));
 		z80_gen_int(&cpu, 0xff);
 #ifdef SND_HEALTH
 		g_irq_redeliver++;
@@ -275,6 +298,7 @@ static void switchbank(int bank, uint16_t port) {
 	if (off < m_rom_size) {
 		z80_bank[bank] = M_ROM + off;
 		rmap_fill(win_lo[bank], win_hi[bank], z80_bank[bank]);
+		ZTR(ztr_bank(bank));
 	}
 }
 
@@ -351,6 +375,146 @@ static void z80_out(z80 *z, uint16_t port, uint8_t val) {
 	case 0x0c: result_code = val; break;                 // reply to 68k
 	}
 }
+
+// --- Z80 owner trace recorder (MVS64_Z80TRACE, PC diagnostic) ---------------
+// Records everything this owner does to the Z80 core between two
+// sound_gen_samples() boundaries, in order, so another core can replay it and
+// be checked against every result (format: z80trace.h,
+// tools/z80trace-format.md). Env:
+//   MVS64_Z80TRACE=<file>      output path (recording is off without it)
+//   MVS64_Z80TRACE_AT=<sec>    start after this much Z80 time (default 40)
+//   MVS64_Z80TRACE_LEN=<sec>   length in Z80 time (default 1)
+// While recording, the port callbacks are swapped for traced wrappers. A
+// callback's own record (IN/OUT) is written first; effects it causes (bank
+// switch, YM IRQ line change) follow it. IN effects happen before its value
+// is known, so they are held back and flushed after the IN record.
+#ifdef MVS64_Z80TRACE
+#include "z80trace.h"
+#include <stdio.h>
+static FILE *ztr_f;
+static int ztr_on, ztr_done;
+static unsigned long ztr_end;
+static unsigned long ztr_runs, ztr_steps, ztr_recs;
+static int ztr_hold;                     // inside port_in: hold effects back
+static uint8_t ztr_held[64]; static int ztr_nheld;
+
+static void ztr_rec(uint8_t type, const uint8_t *pl, int n) {
+	if (ztr_hold) {                      // effect inside port_in: hold back
+		if (ztr_nheld + 1 + n > (int)sizeof ztr_held) {
+			plat_log("[Z80TRACE] held-effect overflow\n"); abort();
+		}
+		ztr_held[ztr_nheld++] = type;
+		memcpy(ztr_held + ztr_nheld, pl, n); ztr_nheld += n;
+		return;
+	}
+	fputc(type, ztr_f);
+	if (n) fwrite(pl, 1, n, ztr_f);
+	ztr_recs++;
+}
+static void ztr_irq(int level) {
+	if (!ztr_on) return;
+	uint8_t b = level ? 1 : 0; ztr_rec(Z80T_IRQ, &b, 1);
+}
+static void ztr_genint(uint8_t data) { if (ztr_on) ztr_rec(Z80T_GENINT, &data, 1); }
+static void ztr_nmi(void) { if (ztr_on) ztr_rec(Z80T_NMI, NULL, 0); }
+static void ztr_setcyc(void) {
+	if (!ztr_on) return;
+	uint8_t b[4]; z80t_put32(b, (uint32_t)cpu.cyc); ztr_rec(Z80T_SETCYC, b, 4);
+}
+static void ztr_setr(void) { if (ztr_on) ztr_rec(Z80T_SETR, &cpu.r, 1); }
+static void ztr_bank(int window) {
+	if (!ztr_on) return;
+	uint8_t b[5]; b[0] = window;
+	z80t_put32(b + 1, (uint32_t)(z80_bank[window] - M_ROM));
+	ztr_rec(Z80T_BANK, b, 5);
+}
+static void ztr_port(uint8_t type, uint16_t port, uint8_t val) {
+	uint8_t b[7]; z80t_put16(b, port); b[2] = val; z80t_put32(b + 3, (uint32_t)cpu.cyc);
+	ztr_rec(type, b, 7);
+}
+static uint8_t ztr_port_in(z80 *z, uint16_t port) {
+	ztr_hold = 1; ztr_nheld = 0;
+	uint8_t v = z80_in(z, port);
+	ztr_hold = 0;
+	ztr_port(Z80T_IN, port, v);
+	for (int i = 0; i < ztr_nheld; ) {   // replay the held records in order
+		uint8_t t = ztr_held[i++];
+		int n = t == Z80T_BANK ? 5 : t == Z80T_IRQ ? 1 : -1;
+		if (n < 0) { plat_log("[Z80TRACE] unexpected held record %02x\n", t); abort(); }
+		ztr_rec(t, ztr_held + i, n); i += n;
+	}
+	return v;
+}
+static void ztr_port_out(z80 *z, uint16_t port, uint8_t val) {
+	ztr_port(Z80T_OUT, port, val);
+	z80_out(z, port, val);               // YM IRQ changes land after the OUT
+}
+static void ztr_hash_end(uint8_t type, int with_steps, unsigned nsteps, uint16_t last_pc) {
+	uint8_t b[10]; int n = 0;
+	if (with_steps) { z80t_put32(b, nsteps); z80t_put16(b + 4, last_pc); n = 6; }
+	z80t_put32(b + n, z80t_state_hash(&cpu)); n += 4;
+	ztr_rec(type, b, n);
+}
+static unsigned ztr_run(unsigned long until, uint16_t *last_pc) {
+	if (!ztr_on) return z80_run(&cpu, until, last_pc);
+	uint8_t b[4]; z80t_put32(b, (uint32_t)until); ztr_rec(Z80T_RUN, b, 4);
+	unsigned n = z80_run(&cpu, until, last_pc);
+	ztr_hash_end(Z80T_RUN_END, 1, n, *last_pc);
+	ztr_runs++; ztr_steps += n;
+	if ((ztr_runs & 4095) == 0) {
+		uint8_t c[4]; z80t_put32(c, z80t_crc32(z80_ram, sizeof z80_ram));
+		ztr_rec(Z80T_RAMCRC, c, 4);
+	}
+	return n;
+}
+static void ztr_step(void) {
+	if (!ztr_on) { z80_step(&cpu); return; }
+	ztr_rec(Z80T_STEP, NULL, 0);
+	z80_step(&cpu);
+	ztr_hash_end(Z80T_STEP_END, 0, 0, 0);
+	ztr_steps++;
+}
+static void ztr_poll(void) {
+	static int init; static unsigned long start;
+	if (ztr_done) return;
+	if (!init) {
+		init = 1;
+		const char *f = getenv("MVS64_Z80TRACE");
+		if (!f) { ztr_done = 1; return; }
+		const char *a = getenv("MVS64_Z80TRACE_AT"), *l = getenv("MVS64_Z80TRACE_LEN");
+		start = (unsigned long)((a ? atof(a) : 40.0) * Z80_CLOCK);
+		ztr_end = start + (unsigned long)((l ? atof(l) : 1.0) * Z80_CLOCK);
+		ztr_f = fopen(f, "wb");
+		if (!ztr_f) { plat_log("[Z80TRACE] cannot open %s\n", f); ztr_done = 1; return; }
+	}
+	if (!ztr_on && (long)(cpu.cyc - start) >= 0) {
+		// Header: magic, version, start state, RAM, banks, M1 ROM.
+		uint8_t h[12], s[Z80T_STATE_SIZE];
+		memcpy(h, Z80T_MAGIC, 8); z80t_put32(h + 8, Z80T_VERSION);
+		fwrite(h, 1, 12, ztr_f);
+		z80t_state_save(&cpu, s); fwrite(s, 1, sizeof s, ztr_f);
+		fwrite(z80_ram, 1, sizeof z80_ram, ztr_f);
+		for (int w = 0; w < 4; w++) {
+			uint8_t o[4]; z80t_put32(o, (uint32_t)(z80_bank[w] - M_ROM)); fwrite(o, 1, 4, ztr_f);
+		}
+		uint8_t sz[4]; z80t_put32(sz, m_rom_size); fwrite(sz, 1, 4, ztr_f);
+		fwrite(M_ROM, 1, m_rom_size, ztr_f);
+		cpu.port_in = ztr_port_in; cpu.port_out = ztr_port_out;
+		ztr_on = 1;
+		plat_log("[Z80TRACE] recording from cyc %lu (pc %04x)\n", (unsigned long)cpu.cyc, cpu.pc);
+	} else if (ztr_on && (long)(cpu.cyc - ztr_end) >= 0) {
+		uint8_t s[Z80T_STATE_SIZE];
+		z80t_state_save(&cpu, s);
+		fputc(Z80T_END, ztr_f); fwrite(s, 1, sizeof s, ztr_f);
+		fwrite(z80_ram, 1, sizeof z80_ram, ztr_f);
+		fclose(ztr_f); ztr_f = NULL;
+		cpu.port_in = z80_in; cpu.port_out = z80_out;
+		ztr_on = 0; ztr_done = 1;
+		plat_log("[Z80TRACE] done at cyc %lu: %lu runs, %lu instructions, %lu records\n",
+		         (unsigned long)cpu.cyc, ztr_runs, ztr_steps, ztr_recs);
+	}
+}
+#endif
 
 // --- sound.h seam ----------------------------------------------------------
 void sound_init(void) {
@@ -502,17 +666,18 @@ void sound_write_command(uint8_t cmd) {
 	if (!cpu.iff1 && !cpu.halted) {   // a DI+HALT park only an NMI can wake:
 		unsigned long cap = cpu.cyc + 1500;   // don't burn the cap stepping it
 		while ((long)(cap - cpu.cyc) > 0 && !cpu.iff1 && !cpu.halted)
-			z80_step(&cpu);
+			Z80_STEP();
 #ifdef SND_HEALTH
 		if (!cpu.iff1) g_nmi_precap++;
 #endif
 	}
+	ZTR(ztr_nmi());
 	z80_gen_nmi(&cpu);
 	{
 		unsigned long cap = cpu.cyc + 8000;
 		while ((long)(cap - cpu.cyc) > 0 && (cpu.nmi_pending || !cpu.iff1)) {
 			z80_service_level_irq();
-			z80_step(&cpu);
+			Z80_STEP();
 		}
 #ifdef SND_HEALTH
 		if (!cpu.iff1) g_nmi_postcap++;
@@ -568,7 +733,11 @@ static void emit(int16_t *out, int from, int count) {
 #endif
 }
 
+#ifdef MVS64_Z80TRACE
+static void ztr_poll(void);
+#endif
 int sound_gen_samples(int16_t *out, int nsamples) {
+	ZTR(ztr_poll());
 	if (!z80_active) {
 		memset(out, 0, (size_t)nsamples * 2 * sizeof(int16_t));
 		return nsamples;
@@ -652,6 +821,7 @@ int sound_gen_samples(int16_t *out, int nsamples) {
 				g_z80_skipcyc += (next - cpu.cyc); g_z80_skips++;
 #endif
 				cpu.cyc = next;
+				ZTR(ztr_setcyc());
 				break;
 			}
 #endif
@@ -666,7 +836,7 @@ int sound_gen_samples(int16_t *out, int nsamples) {
 			const unsigned long until = next;
 #endif
 			uint16_t pc0;
-			unsigned nsteps = z80_run(&cpu, until, &pc0);
+			unsigned nsteps = Z80_RUN(until, &pc0);
 #ifdef SND_HEALTH
 			g_z80_steps += nsteps;
 #else
@@ -693,6 +863,7 @@ int sound_gen_samples(int16_t *out, int nsamples) {
 					unsigned long k = ((unsigned long)rem + c - 1) / c;
 					cpu.cyc += k * c;
 					cpu.r = (uint8_t)((cpu.r & 0x80) | ((cpu.r + k) & 0x7f));
+					ZTR(ztr_setcyc()); ZTR(ztr_setr());
 #ifdef SND_HEALTH
 					g_z80_skipcyc += k * c; g_z80_skips++;
 #endif
@@ -715,6 +886,7 @@ int sound_gen_samples(int16_t *out, int nsamples) {
 #endif
 #ifndef MVS64_NOIDLESKIP
 						cpu.cyc = next;         // identical iteration -> jump to event
+						ZTR(ztr_setcyc());
 						break;
 #endif
 					}
