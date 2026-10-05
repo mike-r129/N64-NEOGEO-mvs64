@@ -112,6 +112,14 @@ static int z80_wrote;                    // set by z80_out/z80_write = real work
 #ifdef SND_HEALTH
 static unsigned long g_z80_steps, g_z80_skipcyc; static int g_z80_skips;
 #endif
+#ifdef MVS64_Z80HIST
+// Diagnostic: where do the interpreted Z80 steps actually go? 16-byte PC
+// buckets accumulated per step; top buckets reported per [SNDRMS] interval.
+// Also counts stepping segments (timer-boundary re-entries) to price the
+// per-segment cache-reentry cost. Diagnostic builds only (16KB table).
+static uint32_t z80_hist[4096];
+static uint32_t g_z80_segs;
+#endif
 // [SNDPROF] split cost telemetry (N64): where does audio wall-time actually go —
 // stepping the Z80 vs synthesising the YM2610? Reported in the [SNDRMS] line as
 // z80ms/ymms per 60-call interval (TICKS_PER_SECOND/1000 ticks per ms).
@@ -622,6 +630,9 @@ int sound_gen_samples(int16_t *out, int nsamples) {
 #if defined(SND_HEALTH) && defined(N64)
 		uint32_t _zt0 = TICKS_READ();
 #endif
+#ifdef MVS64_Z80HIST
+		if ((long)(next - cpu.cyc) > 0) g_z80_segs++;
+#endif
 		while ((long)(next - cpu.cyc) > 0) {   // wrap-safe (see NMI note)
 			z80_service_level_irq();   // must precede the HALT check: a
 			                           // re-delivered tick wakes a halted CPU
@@ -646,6 +657,9 @@ int sound_gen_samples(int16_t *out, int nsamples) {
 #endif
 			uint16_t pc0 = cpu.pc;
 			z80_wrote = 0;
+#ifdef MVS64_Z80HIST
+			z80_hist[cpu.pc >> 4]++;
+#endif
 			z80_step_inline(&cpu);
 #ifdef SND_HEALTH
 			g_z80_steps++;
@@ -740,7 +754,7 @@ int sound_gen_samples(int16_t *out, int nsamples) {
 			// call (they feed nothing but the print). Computing them every
 			// call — with a linear-search square root of up to ~32k 64-bit
 			// multiplies — cost ~2.8% of frame time in every SND_HEALTH
-			// build. isqrt below is the exact floor(sqrt(m)).
+			// build (PCPROF). isqrt below is the exact floor(sqrt(m)).
 			uint64_t acc = 0; int pk = 0;
 			for (int i = 0; i < nsamples * 2; i++) {
 				int v = out[i]; if (v < 0) v = -v;
@@ -786,6 +800,26 @@ int sound_gen_samples(int16_t *out, int nsamples) {
 #endif
 			plat_log("[SNDTMR] fires=%d,%d\n", g_timer_fires[0], g_timer_fires[1]);
 			g_timer_fires[0] = g_timer_fires[1] = 0;
+#ifdef MVS64_Z80HIST
+			{
+				// Top-12 16-byte PC buckets this interval + segment count.
+				char hb[200]; int hn = 0;
+				hn += snprintf(hb + hn, sizeof hb - (size_t)hn, "segs=%lu",
+				               (unsigned long)g_z80_segs);
+				for (int k = 0; k < 12 && hn < (int)sizeof hb - 16; k++) {
+					uint32_t best = 0; int bi = -1;
+					for (int j = 0; j < 4096; j++)
+						if (z80_hist[j] > best) { best = z80_hist[j]; bi = j; }
+					if (bi < 0 || !best) break;
+					hn += snprintf(hb + hn, sizeof hb - (size_t)hn,
+					               " %03x0=%lu", bi, (unsigned long)best);
+					z80_hist[bi] = 0;   // consumed (rest cleared below)
+				}
+				plat_log("[Z80HIST] %s\n", hb);
+				memset(z80_hist, 0, sizeof z80_hist);
+				g_z80_segs = 0;
+			}
+#endif
 			g_prof_z80t = 0; g_prof_ymt = 0; g_prof_gen = 0;
 			{
 				// Latched-voice hunt: snapshot every tone-holding state element

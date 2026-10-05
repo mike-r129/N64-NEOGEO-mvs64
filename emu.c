@@ -444,6 +444,9 @@ int main(int argc, char *argv[]) {
 	#endif
 
 	plat_init(MVS64_AUDIO_RATE, FPS);
+	#if defined(MVS64_PCPROF) && defined(N64)
+	{ extern void pcprof_init(void); pcprof_init(); }
+	#endif
 
 	#ifndef N64
 	// Headless test harness: when MVS64_FRAMES=N is set, run N frames with no

@@ -86,6 +86,14 @@ perf_m68k_insns: .long 0
     .globl perf_idle_skips
 perf_idle_skips: .long 0
 #endif
+#ifdef MVS64_OPHIST
+# Exact per-opcode execution histogram (65536 u32 slots, table lives in
+# emu_diag.c). Diagnostic builds only: the dispatch bump costs ~6 insns plus a
+# dcache touch per executed instruction, so absolute timings are skewed —
+# use the counts, not the fps, from an OPHIST run.
+    .globl m64k_ophist_ptr
+m64k_ophist_ptr: .long m64k_ophist_tab
+#endif
 #ifdef M64K_BLOCKOPS
 # 1 when the PB-ROM bank window [0x200000,0x300000) is linearly TLB-mapped
 # (set by hw_init), so the long copy may read from it; 0 in cache mode.
@@ -411,6 +419,14 @@ opshiftsmem:
     lw t1, perf_m68k_insns
     addiu t1, 1
     sw t1, perf_m68k_insns
+#endif
+#ifdef MVS64_OPHIST
+    lw t1, m64k_ophist_ptr
+    sll t2, opcode, 2
+    addu t1, t2
+    lw t2, 0(t1)
+    addiu t2, 1
+    sw t2, 0(t1)
 #endif
     #if M64K_CONFIG_ADDRERR
     sw opcode, M64K_OFF_IR(ctx)

@@ -17,7 +17,19 @@ extern uint32_t perf_m68k_slices;
 extern m64k_t m64k;
 #endif
 
+#ifdef MVS64_OPHIST
+// Exact per-opcode execution histogram; bumped per dispatched instruction
+// in m64k_asm.S (m64k_ophist_ptr points here). 256KB, diagnostic only.
+uint32_t m64k_ophist_tab[65536] __attribute__((aligned(16)));
+#endif
+
 void emu_diag_frame(void) {
+	#ifdef MVS64_PCPROF
+	{
+		extern void pcprof_frame(int frame, int counted);
+		pcprof_frame(g_frame, g_frame >= MVS64_PCPROF);
+	}
+	#endif
 	#ifdef M64K_TRACECRC
 	{
 		// Per-frame 68k state-trace hash (m64k.c): two runs of the same
@@ -140,6 +152,48 @@ void emu_diag_frame(void) {
 			dpc_clk0 = clk; dpc_pipe0 = pipe; dpc_tmem0 = tmem;
 			perf_dr_miss = perf_dr_missticks = 0;
 		}
+	}
+	#endif
+	#ifdef MVS64_OPHIST
+	// Exact per-opcode execution histogram (bumped in m64k_asm.S's
+	// dispatch). Every 300 frames: dump every opcode above ~0.05% of
+	// the interval's executed instructions, then reset.
+	if ((g_frame % 300) == 299) {
+		uint64_t total = 0;
+		for (int i = 0; i < 65536; i++) total += m64k_ophist_tab[i];
+		uint32_t thresh = (uint32_t)(total / 2000);
+		if (thresh < 4) thresh = 4;
+		enum { OPHIST_MAX = 384 };
+		static uint16_t sel_op[OPHIST_MAX];
+		static uint32_t sel_n[OPHIST_MAX];
+		int nsel = 0;
+		uint64_t selected = 0;
+		for (int i = 0; i < 65536 && nsel < OPHIST_MAX; i++) {
+			if (m64k_ophist_tab[i] >= thresh) {
+				sel_op[nsel] = (uint16_t)i;
+				sel_n[nsel] = m64k_ophist_tab[i];
+				selected += m64k_ophist_tab[i];
+				nsel++;
+			}
+		}
+		// insertion sort, descending by count (nsel <= 384)
+		for (int i = 1; i < nsel; i++) {
+			uint16_t o = sel_op[i]; uint32_t n = sel_n[i]; int j = i - 1;
+			while (j >= 0 && sel_n[j] < n) {
+				sel_op[j+1] = sel_op[j]; sel_n[j+1] = sel_n[j]; j--;
+			}
+			sel_op[j+1] = o; sel_n[j+1] = n;
+		}
+		framef("[OPHIST] total=%llu sel=%llu nsel=%d\n",
+			(unsigned long long)total, (unsigned long long)selected, nsel);
+		for (int i = 0; i < nsel; i += 8) {
+			char line[160]; int p = 0;
+			for (int j = i; j < nsel && j < i + 8; j++)
+				p += sprintf(line + p, " %04x:%lu",
+					sel_op[j], (unsigned long)sel_n[j]);
+			framef("[OPH]%s\n", line);
+		}
+		memset(m64k_ophist_tab, 0, sizeof(m64k_ophist_tab));
 	}
 	#endif
 	#ifdef MVS64_IDLEPROBE
