@@ -65,13 +65,20 @@ static uint64_t m68k_clock;
 static EmuEvent events[MAX_EVENTS];
 uint32_t profile_hw_io;
 uint32_t profile_dma_load;
+uint32_t profile_m68k;   // ticks inside the 68k core this frame (incl. MMIO)
+uint32_t profile_snd;    // ticks synthesizing audio (Z80+YM2610) this frame
 
 static uint64_t m68k_exec(uint64_t clock) {
 	clock /= M68K_CLOCK_DIV;
 	if (clock > m68k_clock) {
 		#ifdef USE_M64K
-		debugf("m68k_exec: %d\n", (int)(clock - m68k_clock));
+		#ifdef N64
+		uint32_t t0 = TICKS_READ();
 		m68k_clock = m64k_run(&m64k, clock);
+		profile_m68k += TICKS_DISTANCE(t0, TICKS_READ());
+		#else
+		m68k_clock = m64k_run(&m64k, clock);
+		#endif
 		#else
 		m68k_clock += m68k_execute(clock - m68k_clock);
 		#endif
@@ -181,6 +188,7 @@ uint32_t emu_render(void *arg) {
 			skip++;
 			if (skip < MAX_SKIP) {
 				debugf("[RENDER] skip frame\n");
+				plat_audio_pump();   // audio pumps once per frame regardless
 				return FRAME_CLOCK;
 			}
 			debugf("[RENDER] max skip\n");
@@ -195,6 +203,9 @@ uint32_t emu_render(void *arg) {
 	if (CONFIG_FRAMESKIP_MODE == 1) {
 		if (g_frame & 1) {
 			debugf("[RENDER] skip frame\n");
+			#ifdef N64
+			plat_audio_pump();   // audio pumps once per frame regardless
+			#endif
 			return FRAME_CLOCK;
 		}
 	}
@@ -211,6 +222,12 @@ uint32_t emu_render(void *arg) {
 
 	#ifdef N64
 	render_time = TICKS_DISTANCE(t0, TICKS_READ());
+
+	// Top up the audio once per frame, right after the frame's draw
+	// commands were issued. sound_gen_samples() is rate-agnostic and the
+	// AI ring is wall-clock driven, so where in the frame this runs does
+	// not affect audio timing.
+	plat_audio_pump();
 	#endif
 
 	return FRAME_CLOCK;
@@ -255,9 +272,7 @@ int main(int argc, char *argv[]) {
 
 	plat_init(MVS64_AUDIO_RATE, FPS);
 	plat_enable_video(true);
-	#ifndef N64
 	plat_enable_audio(1);
-	#endif
 
 	#ifdef N64
 	rom_load("rom:/");
@@ -294,9 +309,12 @@ int main(int argc, char *argv[]) {
 		render_time = 0;
 		profile_hw_io = 0;
 		profile_dma_load = 0;
+		profile_m68k = 0;
+		profile_snd = 0;
 		#ifdef N64
 		uint32_t t0 = TICKS_READ();
 		#endif
+
 		emu_run_frame();
 		if (!plat_poll()) break;
 
@@ -313,8 +331,10 @@ int main(int argc, char *argv[]) {
 		#ifdef N64
 		uint32_t emu_time = TICKS_DISTANCE(t0, TICKS_READ());
 
-		debugf("[PROFILE] cpu:%.2f%% io:%.2f%% draw:%.2f%% dma:%.2f%% PC:%06lx\n",
+		debugf("[PROFILE] cpu:%.2f%% m68k:%.2f%% snd:%.2f%% io:%.2f%% draw:%.2f%% dma:%.2f%% PC:%06lx\n",
 			(float)emu_time * 100.f / (float)(TICKS_PER_SECOND / 60),
+			(float)profile_m68k * 100.f / (float)(TICKS_PER_SECOND / 60),
+			(float)profile_snd * 100.f / (float)(TICKS_PER_SECOND / 60),
 			(float)profile_hw_io * 100.f / (float)(TICKS_PER_SECOND / 60),
 			(float)render_time * 100.f / (float)(TICKS_PER_SECOND / 60),
 			(float)profile_dma_load * 100.f / (float)(TICKS_PER_SECOND / 60),
