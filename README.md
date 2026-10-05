@@ -3,22 +3,48 @@
 <img src="https://github.com/rasky/mvs64/raw/main/screens/image0.jpg" width="320">
 <img src="https://github.com/rasky/mvs64/raw/main/screens/pbobblen.png" width="320">
 
+This is a fork of [rasky/mvs64](https://github.com/rasky/mvs64), Giovanni
+Bajo's NeoGeo emulator for the N64. Upstream MVS64 has no sound and most games
+run below full speed. This fork adds the NeoGeo sound hardware, moves the
+audio synthesis onto the RSP, speeds up the 68000 core and the renderer, and
+adds the tools used to measure and check all of that. The work comes from a
+separate project that got Samurai Shodown II running on a real console; here
+it is generalized so it is not tied to that one game. The plan is to offer it
+upstream once it has been discussed with the maintainer.
+
 ### Status
 
 MVS64 is still in an early stage. Only a handful of games boot or work, and
-only Samurai Shodown II (`samsho2`) has been tested with everything below.
+only Samurai Shodown II (`samsho2`) has been tested with the changes below.
 
 - **Sound** is emulated: the Z80 sound CPU and the YM2610 (FM, SSG,
   ADPCM-A/B). The FM and ADPCM synthesis runs on the RSP. Audio plays at
-  11,025 Hz on N64, and the ADPCM samples are streamed from the cart.
+  11,025 Hz on N64, and the ADPCM samples stream from the cart.
 - **Speed:** samsho2's attract mode runs at 60 fps in ares. Fights do not
-  hold 60 fps: they ran around 50 fps on a real console, down to about 42 in
-  the heaviest scenes, in the samsho2 fork this work comes from.
+  hold 60 fps: they ran at about 50 fps on a real console in the samsho2
+  project, dropping to about 42 in the heaviest scenes.
 - **Expansion Pak** recommended: with 8 MB the C-ROM tile cache gets 4,096
   slots instead of 1,280, which matters in busy scenes.
-- Other games need their own idle-skip entries (see below) and may hit
-  hardware features that are not emulated yet, such as the LSPC timer
-  interrupt used for raster effects.
+- **Other games** need their own idle-skip entries (see below), and may use
+  hardware that is not emulated yet, such as the LSPC timer interrupt that
+  raster effects need.
+- This tree has been checked in ares and with the PC build. A full test on
+  a real console is still to do.
+
+### What this fork adds
+
+| Area | Changes |
+| --- | --- |
+| Fixes | A build that works with current libdragon, 68000 exceptions (CHK, STOP, illegal and privileged instructions) and a BCLR/BSET bug that corrupted BIOS state, the memory-card bank, TLB faults in branch delay slots, TLB cache coherency, deterministic sprite-cache eviction, and an idle-skip compare that never matched |
+| Sound | Z80 core (superzazu/z80) and YM2610 (MAME-derived, integer-only), the 68000 command and reply latches, ROM conversion that splits the ADPCM-A and ADPCM-B sample ROMs, and an interrupt-fed audio ring on N64 |
+| RSP audio | FM and ADPCM synthesis on the RSP (`rsp_fm.S`, `rsp_audio.S`) with the channel state kept on the RSP between chunks, plus fixes for two libdragon rspq races this load exposes |
+| Video | Empty-tile skipping for sprites and the fix layer, a direct C-ROM tile table, a 2-word RSP sprite command, triple buffering, palette conversion only when the palette changes, and a larger tile cache with the Expansion Pak |
+| 68000 (m64k) | No per-instruction interrupt poll, per-game idle skip, inline fast paths for the hottest instructions, video-port stores without a trap, fused DBF copy/fill loops, and the core's hot code and data pinned to fixed cache sets |
+| Testing | The TomHarte 68000 testsuite on N64, a headless PC harness with scripted input, framebuffer and 68000 state hashes for A/B checks, profilers and on-screen overlays for real hardware |
+
+Each area was merged as its own pull request, one commit per change, with
+the test results in the commit messages; see the
+[closed pull requests](https://github.com/mike-r129/mvs64/pulls?q=is%3Apr+is%3Aclosed).
 
 ### How to build
 
@@ -30,7 +56,7 @@ instructions of libdragon-docker if you haven't already.
 
 Once you have the docker container configured, clone mvs64:
 
-	$ git clone https://github.com/rasky/mvs64
+	$ git clone https://github.com/mike-r129/mvs64
 	$ cd mvs64
 
 Start the docker container in the mvs64 directory:
@@ -45,26 +71,29 @@ When building, you need to specify the path to a NeoGeo BIOS file that you
 want to use, and the path to a NeoGeo game ROM, as a zip file. Both `BIOS` and
 `ROM` are actually environment variables, so you can set them in your environment
 once to avoid specifying them on the command line (doing that for `BIOS` is
-especially useful, as you rarely change that).
+especially useful, as you rarely change that). ROM and BIOS files are not
+included in this repository.
 
 This command will create a Nintendo 64 ROM called `mvs64-<gamename>.z64`, that
-you can use with an emulator or on a real console using a development kit
-like 64drive or EverDrive 64. `mvsmakerom` prints the size of the converted
-ROM set; most flash carts take at most 64 MB.
+you can use with an emulator or on a real console using a flash cart like
+64drive or EverDrive 64. `mvsmakerom` prints the size of the converted ROM
+set; most flash carts take at most 64 MB.
 
 **NOTE**: during the build, the path of the BIOS will be inspected to search for
 a ROM called `sfix.sfix`, which is also part of the standard BIOS sets. That
 ROM must reside in the same folder of the specified BIOS.
 
-#### libdragon patches (RSP audio offload)
+#### libdragon patches (required)
 
 The sound emulation runs the YM2610 synthesis on the RSP, issuing hundreds of
 short high-priority rspq segments per second. That load hits two races in
 libdragon's rspq that wedge the RSP on real hardware (the RSP sleeps with work
 pending, and the next wait times out into the crash screen). Until the fixes
-are merged into libdragon, apply the patches in `patches/` to the libdragon
-source tree you build from (with libdragon-docker, the `libdragon/` folder
-of this repository), then rebuild and reinstall libdragon:
+are merged into libdragon, build against a libdragon that has them. Either use
+[mike-r129/libdragon](https://github.com/mike-r129/libdragon) (`trunk`, with
+the three patches merged), or apply the patches in `patches/` to the libdragon
+source tree you build from (with libdragon-docker, the `libdragon/` folder of
+this repository), then rebuild and reinstall libdragon:
 
 	$ cd libdragon
 	$ patch -p1 < ../patches/libdragon-rspq-closed-loop-flush.patch
@@ -86,7 +115,7 @@ Add these to the `make mvs64` command line:
 | --- | --- |
 | `EXTRA_DEFINES=-DMVS64_QUIET` | Release build: the per-frame debug log is compiled out (it costs frame time on hardware) |
 | `FRAMESKIP=n` | Skip drawing up to n frames in a row when emulation falls behind, so game speed holds; off by default |
-| `INPUT=<file>` | Replay a scripted input file (see "Scripted input" below) |
+| `INPUT=<file>` | Replay a scripted input file (see "Headless runs and scripted input" below) |
 | `WP_OFF=1`, `ADPCM_CPU=1 WP_OFF=1` | Turn off the RSP whole-pump audio offload, or all RSP audio |
 | `FP_OFF=1`, `BLOCKOPS_OFF=1`, `PORTSTORE_OFF=1` | Turn off the 68000 fast paths, the fused DBF copy/fill loops, or the inline video-port stores (for A/B tests) |
 | `MUSASHI=1` | Use the portable Musashi 68000 core instead of m64k (much slower; for isolating m64k bugs) |
@@ -163,11 +192,30 @@ frames.
 If sound dies but `C` stays near 11025, delivery still works and generation
 stopped: check `D` and `S`. If `C` drops to 0, the audio interrupt chain died.
 
+### Testing
+
+Changes in this fork are checked against builds without them:
+
+- **68000 core:** the m64k testsuite runs the
+  [TomHarte 68000 tests](https://github.com/TomHarte/ProcessorTests/tree/main/680x0/68000/v1)
+  on the N64. The test vectors are not in the repository: download the
+  `*.json.gz` files into `m64k/assets/`, then run
+  `./mkquick.sh && go run mktest.go` there (this also generates the
+  ADDQ/SUBQ vectors the TomHarte set lacks) and build with `make` in `m64k/`.
+  The current result is 125 of 126 files passing; the one failure is a known
+  N-flag edge case of CHK.
+- **Sound and video:** the PC build, run headless with a scripted input file
+  (below), must produce the same WAV and screenshots before and after a
+  change that should not alter them.
+- **N64:** builds with `TRCRC_ON=1`, `MVS64_FBCRC` and `MVS64_DET_AUDIO` must
+  produce the same 68000 state and framebuffer hashes with a switch on and
+  off; `tools/trcdiff.sh` and `tools/compare-fbcrc.py` compare two logs.
+
 ### Compatibility
 
 | Game | NGH | Boots | Gameplay | Sound | Notes |
 | --- | --- | --- | --- | --- | --- |
-| Samurai Shodown II | 063 | Yes | Yes | Yes | The test game: 60 fps attract in ares; fights about 42-50 fps on hardware (measured in the samsho2 fork) |
+| Samurai Shodown II | 063 | Yes | Yes | Yes | The test game: 60 fps attract in ares; fights about 42-50 fps on hardware |
 | Metal Slug | 201 | ? | ? | ? | Idle-skip address from the original MVS64 list, not tested |
 
 Other games have not been tested since sound was added.
@@ -198,9 +246,7 @@ embedded in the final `.z64` file. Pass that folder to the `emu` binary:
 
 #### Headless runs and scripted input
 
-The PC build can also run without a window, which is how sound and video
-changes are checked: two builds fed the same input must produce the same
-audio and the same screenshots.
+The PC build can also run without a window:
 
 | Environment variable | Effect |
 | --- | --- |
@@ -211,9 +257,18 @@ audio and the same screenshots.
 
 A scripted input file has one line per key press, `<first frame> <last frame>
 <key>`, where the key is one of `coin start select a b c d up down left
-right`; lines starting with `#` are comments. The N64 build replays the same
-file when built with `make mvs64 ... INPUT=<file>`, at the same guest frames,
-so the PC and N64 builds can be compared on the same game content.
+right`; lines starting with `#` are comments. For example, two coins and a
+start:
+
+	# frames are guest frames, counted from boot
+	540 547 coin
+	560 567 coin
+	610 618 start
+
+The N64 build replays the same file when built with
+`make mvs64 ... INPUT=<file>`, at the same guest frames, so the PC and N64
+builds can be compared on the same game content. Scripts are specific to a
+game and are not stored in the repository.
 
 ### Credits and licenses
 
@@ -222,7 +277,9 @@ so the PC and N64 builds can be compared on the same game content.
 - **Z80 core:** [superzazu/z80](https://github.com/superzazu/z80) by Nicolas
   Allemand, MIT ([z80.LICENSE](z80.LICENSE)).
 - **YM2610:** the MAME FM sound core by Jarek Burczynski and Tatsuyuki Satoh,
-  by way of NJ's pspmvs ([ym2610/LICENSE.mame](ym2610/LICENSE.mame)).
+  by way of NJ's pspmvs ([ym2610/LICENSE.mame](ym2610/LICENSE.mame)). Note
+  that its license is not MIT: redistributions may not be sold or used
+  commercially, and modified versions must ship their complete source.
 - **Musashi** 68000 core (PC build and fallback core): Karl Stenerud.
 - **[libdragon](https://github.com/DragonMinded/libdragon):** the N64 SDK this
   is built on.
