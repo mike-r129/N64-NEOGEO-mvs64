@@ -15,6 +15,8 @@ from the repository root (Linux or WSL); the Python scripts need Python 3.
 | `nm-perfsyms.sh` | Cache sets of the 68k perf counters against the m64k context. |
 | `wavcheck.py` | Continuity, gap and click report for a PC harness `MVS64_WAV` capture. |
 | `l0.py` | Derives the vertical-shrink table in `video.c`. |
+| `z80replay.c` | Replays an `MVS64_Z80TRACE` recording through a Z80 core and checks every recorded result. Format: [z80trace-format.md](z80trace-format.md). Build: `gcc -O2 -I. -o z80replay tools/z80replay.c z80.c`. |
+| `z80tstat.py` | Record-type histogram of a Z80 trace, including the IRQ/BANK effects inside port callbacks. |
 
 The gates compare two builds of the same tree that differ in one switch,
 fed the same scripted input (`MVS64_INPUT` on PC, `make ... INPUT=` on N64).

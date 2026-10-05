@@ -157,6 +157,7 @@ Most are enabled with `EXTRA_DEFINES=-D<name>`.
 | `MVS64_FBCRC` | Hash of every finished frame (`[FBCRC]`), for pixel-exact A/B comparisons |
 | `TRCRC_ON=1` (make option) | Hash of the 68000 state per frame (`[TRCRC]`), for execution-exact A/B comparisons |
 | `MVS64_DET_AUDIO` | Generate exactly one frame of audio per frame, so that runs of builds with different speeds stay comparable |
+| `MVS64_Z80TRACE` (PC build) | Record everything the sound code does to the Z80 for a stretch of audio (env `MVS64_Z80TRACE=<file>`, `_AT`, `_LEN` in seconds), for replaying through another Z80 core; see [tools/z80trace-format.md](tools/z80trace-format.md) |
 
 The scripts in `tools/` compare and summarize these logs; see
 [tools/README.md](tools/README.md).
