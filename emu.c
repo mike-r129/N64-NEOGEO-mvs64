@@ -311,7 +311,6 @@ int main(int argc, char *argv[]) {
 			#endif
 		#endif
 
-		rom_next_frame();
 		#ifdef N64
 		uint32_t curtime = TICKS_READ();
 		if (TICKS_DISTANCE(fps_time, curtime) > TICKS_FROM_MS(1000)) {
