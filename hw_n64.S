@@ -8,20 +8,13 @@
 #define SAFE_MODE           1
 
 
+# Trap-time accounting for the [PROFILE] io% column costs ~10 instructions
+# (two COUNT reads + two RMW stores) on every MMIO trap, ~1k traps per busy
+# frame, so the trap path no longer does it: io% reads 0.
 .macro PROFILE_START
-	mfc0 k0, C0_COUNT
-	lw k1, profile_hw_io
-	subu k1, k0
-	la k0, profile_hw_io
-	sw k1, 0(k0)
 .endm
 
 .macro PROFILE_END
-	mfc0 k0, C0_COUNT
-	lw k1, profile_hw_io
-	addu k1, k0
-	la k0, profile_hw_io
-	sw k1, 0(k0)
 .endm
 
 	.section .sdata
@@ -647,12 +640,15 @@ mvs64_asm_io_read16:
 	j tlbcallhandler_standard
 
 mvs64_asm_io_write:
-	beq k1, 0x2FFFF0, asm_pbrom_bankno_w
-	beq k1, 0x300001, asm_watchdog_w
-	beq k1, 0x3C0000, asm_lspc_vram_addr_w
+	# Ordered by measured in-game frequency: the LSPC VRAM data port takes
+	# hundreds of hits per frame (SCB uploads), then the address port,
+	# palette, modulo; watchdog/pbrom-bank are per-frame singletons.
 	beq k1, 0x3C0002, asm_lspc_vram_data_w
-	beq k1, 0x3C0004, asm_lspc_vram_modulo_w
+	beq k1, 0x3C0000, asm_lspc_vram_addr_w
 	bge k1, 0x400000, asm_video_palette_w
+	beq k1, 0x3C0004, asm_lspc_vram_modulo_w
+	beq k1, 0x300001, asm_watchdog_w
+	beq k1, 0x2FFFF0, asm_pbrom_bankno_w
 	j tlbcallhandler_standard
 
 asm_watchdog_w:
