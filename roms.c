@@ -58,8 +58,25 @@ static unsigned int crom_mask;
 static unsigned int crom_num_tiles;
 unsigned int srom_num_tiles;    // non-static: srom_tile_empty_fast (roms.h)
 
+// C-ROM tile cache size in 128-byte slots. Busy scenes draw 600-1000+ tiles
+// per frame and 1280 slots (160KB) thrashed: in ares, 4000 slots cut the miss
+// reads 0.41 -> 0.07 ms/frame and the draw CPU time by 0.6 ms.
+// 4096 slots = 512KB, used when the Expansion Pak is present (~3MB of heap
+// free there); a 4MB console keeps 1280. The 2-word sprite command carries
+// a 14-bit slot index and sprite_cache.c keeps free slots as u16 offsets
+// in 8-byte units, so <= 4096.
+#ifndef MVS64_CROM_SLOTS
+#define MVS64_CROM_SLOTS 4096
+#endif
+#define CROM_SLOTS_4MB 1280
+_Static_assert(MVS64_CROM_SLOTS <= 4096, "slot offsets must fit sprite_cache.c u16");
+
 static void rom_cache_init(void) {
-	const int slots = 1280;   // C-ROM tile cache size in 128-byte slots
+	#ifdef N64
+	int slots = get_memory_size() > 4*1024*1024 ? MVS64_CROM_SLOTS : CROM_SLOTS_4MB;
+	#else
+	int slots = MVS64_CROM_SLOTS;
+	#endif
 	sprite_cache_init(&srom_cache, 4*8, 256);
 	sprite_cache_init(&crom_cache, 8*16, slots);
 	#ifdef N64
