@@ -1,0 +1,563 @@
+// NeoGeo sound subsystem: Z80 audio CPU + YM2610.
+//
+// Implements the sound.h seam with a real Z80 (superzazu core) running the
+// m.rom driver and the MAME YM2610 core (ym2610/). Memory map, bank switching
+// and I/O port layout follow the NeoGeo hardware (cross-checked against
+// gngeo). sound_gen_samples steps the Z80 in cycle-proportional slices and
+// synthesizes the YM2610 output between them.
+#include "sound.h"
+#include "emu.h"
+#include "roms.h"
+#include "platform.h"
+#include "z80.h"
+#include "ym2610/ym2610.h"
+#include <string.h>
+#include <stdlib.h>
+
+
+// NeoGeo audio Z80 runs at 4 MHz; produce one video frame's worth per call.
+#define Z80_CLOCK            4000000
+#define Z80_CYCLES_PER_FRAME (Z80_CLOCK / 60)
+#define YM_CLOCK             8000000
+#define AUDIO_RATE           MVS64_AUDIO_RATE
+
+#define cpu      z80_hot.cpu    // (z80.h: one contiguous Z80 working set)
+static int  z80_active;                 // false when there is no m.rom
+#define z80_ram  z80_hot.ram    // 2KB work RAM at 0xF800-0xFFFF
+static const uint8_t *z80_bank[4];      // window base pointers into M_ROM
+
+static uint8_t sound_code;              // 68k -> Z80 command latch
+static uint8_t result_code;             // Z80 -> 68k reply latch
+static uint8_t pending_command;
+static int snd_dbg;                     // MVS64_SNDDBG: trace Z80 PC
+int sound_silent;                       // see sound.h: run Z80 but emit silence
+
+// NOTE (2026-07-01): the old "stuck-voice guard" that force-zeroed any SSG
+// channel holding a constant nonzero volume for 3s was REMOVED. Telemetry
+// proved it was killing LEGITIMATE sustained SSG content (stage ambience /
+// music beds — drivers hold SSG voices for many seconds by design): every
+// [STUCKGUARD] fire was followed by the in-game rms collapsing to 0, i.e. the
+// guard itself was the "audio keeps cutting out" bug. The failure it guarded
+// against (the AI replaying a stale buffer as an endless tone) is prevented
+// structurally by the guest-clock audio pump + sound_silent underrun path.
+
+
+// --- Z80 idle-skip ---------------------------------------------------------
+// The NeoGeo sound driver spends most of its time in a tight interrupt-wait
+// spin (poll a flag / branch back) between FM-timer ticks. Single-stepping that
+// at the real 4 MHz rate dominates the N64 CPU (~70%), so without this the game
+// drops to ~4 fps once audio is decoupled to real time. We detect a PURE spin —
+// a backward branch that returns to the same PC with byte-identical registers
+// and no port/RAM writes in the loop — and fast-forward cpu.cyc to the next
+// timer deadline. emit() still synthesizes the FM audio for the skipped span, so
+// music keeps sounding; only the redundant Z80 stepping is skipped. Provably
+// equivalent: with identical state and no side effects, every iteration is the
+// same until an external event (the timer IRQ), which fires at the deadline.
+// Delay loops are NOT skipped — they mutate a register (e.g. DJNZ's B), so the
+// snapshot compare fails. This is the sound-CPU analog of the 68k idle-skip.
+static int z80_wrote;                    // set by z80_out/z80_write = real work
+// The snapshot runs at EVERY backward-branch edge of every Z80 loop (not
+// just idle spins), so it is on the stepping hot path: pack the exact same
+// fields as before into three u64s composed in registers and compare those
+// directly — no memset/field stores/memcmp. Same captured state = identical
+// skip decisions at identical cycle boundaries (the WAV-locked invariant).
+struct z80snap { uint64_t q0, q1, q2; };
+static inline void z80_snap(struct z80snap *s, const z80 *z) {
+	s->q0 = (uint64_t)z->sp | ((uint64_t)z->ix << 16) | ((uint64_t)z->iy << 32) |
+	        ((uint64_t)z->a << 48) | ((uint64_t)z->b << 56);
+	s->q1 = (uint64_t)z->c | ((uint64_t)z->d << 8) | ((uint64_t)z->e << 16) |
+	        ((uint64_t)z->h << 24) | ((uint64_t)z->l << 32) |
+	        ((uint64_t)z->a_ << 40) | ((uint64_t)z->b_ << 48) |
+	        ((uint64_t)z->c_ << 56);
+	s->q2 = (uint64_t)z->d_ | ((uint64_t)z->e_ << 8) | ((uint64_t)z->h_ << 16) |
+	        ((uint64_t)z->l_ << 24) | ((uint64_t)z->f_ << 32) |
+	        ((uint64_t)z->i << 40) |
+	        ((uint64_t)(uint8_t)((z->sf<<7)|(z->zf<<6)|(z->yf<<5)|(z->hf<<4)|
+	                             (z->xf<<3)|(z->pf<<2)|(z->nf<<1)|(z->cf)) << 48) |
+	        ((uint64_t)(uint8_t)((z->iff1?1:0)|(z->iff2?2:0)|
+	                             (z->interrupt_mode<<2)) << 56);
+}
+static inline int z80_snap_eq(const struct z80snap *a, const struct z80snap *b) {
+	return a->q0 == b->q0 && a->q1 == b->q1 && a->q2 == b->q2;
+}
+
+// YM2610 stream output (interleaved s16 L/R), filled by YM2610Update_stream()
+// and copied out by emit().
+uint16_t play_buffer[16384];
+
+// Resident ADPCM sample ROMs (v.rom, and vb.rom for sets with a separate
+// ADPCM-B ROM) when RAM allows (PC build); NULL otherwise.
+static uint8_t *vrom_resident, *vromb_resident;
+
+// --- ADPCM sample streaming (V-ROM window caches) ---------------------------
+// A multi-MB V-ROM cannot live in N64 RDRAM, but the YM2610's ADPCM engines
+// read it strictly sequentially per voice. Each of the 7 voices (6x ADPCM-A +
+// the ADPCM-B) gets a small aligned window; a fetch outside the window reloads
+// it via vrom_read (cart DFS/PI DMA on N64) — ~one 2KB read per 0.2s per
+// active voice, a negligible PI load. Fetches happen only during synthesis
+// (audio-pump context, normal C), never inside the 68k MMIO exception handler
+// (key-on just arms the channel), so the PI DMA here is safe.
+// Windows are defined in ym2610.h so the per-byte hit path can be inlined
+// into the ADPCM decoders (it used to be a cross-TU call per nibble pair).
+// Window 6 is the ADPCM-B voice: it reads vb.rom when the set has one.
+struct ym2610_vwin ym2610_vwin[7];
+
+uint8_t ym2610_vrom_fetch_slow(int win, uint32_t addr) {
+	struct ym2610_vwin *w = &ym2610_vwin[win];
+	const int b = (win == 6 && vb_rom_size);
+	const uint32_t size = b ? vb_rom_size : v_rom_size;
+	uint32_t base = addr & ~(uint32_t)(YM2610_VWIN_SIZE - 1);
+	int len = YM2610_VWIN_SIZE;
+	if (base + (uint32_t)len > size) {
+		len = (int)(size - base);         // addr < size is guaranteed
+		if (len <= 0) return 0;           // by the pcmsize clamp upstream
+	}
+	if (b) vromb_read(base, w->buf, len);
+	else   vrom_read(base, w->buf, len);
+	w->base = base; w->valid = 1;
+	return w->buf[addr & (YM2610_VWIN_SIZE - 1)];
+}
+
+// --- YM2610 timer/IRQ glue (cycle-based) -----------------------------------
+// The YM core hands us timer periods as integer Z80 cycles (0 = stop); we track
+// deadlines in Z80 cycles and fire YM2610TimerOver (which raises the Z80 IRQ
+// that ticks the music driver). This whole path is deliberately INTEGER-ONLY:
+// on N64 it runs inside the TLB/MMIO exception handler (68k sound-latch write ->
+// z80_run -> YM register write -> timer start), where the FPU is disabled and
+// no FP context is saved — a single float op there nests into a wild jump.
+static int           ym_timer_on[2];
+static unsigned long ym_timer_deadline[2];   // absolute cpu.cyc
+
+uint32_t ym2610_time_now_cyc(void) {        // FM_GET_TIME_NOW_CYC source
+	return (uint32_t)cpu.cyc;
+}
+
+static void ym_timer_handler(int c, uint32_t cycles) {
+	if (cycles == 0) {
+		ym_timer_on[c] = 0;
+	} else {
+		ym_timer_on[c] = 1;
+		ym_timer_deadline[c] = cpu.cyc + cycles;
+	}
+}
+
+// The YM2610 /IRQ pin is LEVEL-triggered: as long as any unmasked timer flag
+// is set, the line stays low and a real Z80 re-enters the interrupt the moment
+// it executes EI/RETI. z80_gen_int models a one-shot edge (int_pending is
+// consumed on acceptance), so when timers A and B fire close together — they
+// run at ~130/s and ~107/s here and collide constantly — the second assert
+// used to be swallowed (FM_STATUS_SET only calls the IRQ handler on the 0->1
+// edge of ST->irq) and that music tick was silently LOST. A lost tick at the
+// wrong moment leaves the driver's note-off step unexecuted = a latched voice.
+// ym_irq_level mirrors the line so the Z80 run loops can re-assert while high.
+static int ym_irq_level;
+static void ym_irq_handler(int irq) {
+	ym_irq_level = irq;
+	if (irq) z80_gen_int(&cpu, 0xff);       // assert (IM1 -> RST 38h)
+	else     cpu.int_pending = 0;           // deassert if not yet serviced
+}
+
+// Re-deliver a level-held IRQ the edge model dropped: the line is high, the
+// CPU can take interrupts, but no interrupt is pending = a real Z80 would be
+// entering the handler right now. Call before stepping in every Z80 run loop.
+static inline void z80_service_level_irq(void) {
+	if (ym_irq_level && cpu.iff1 && !cpu.int_pending) {
+		z80_gen_int(&cpu, 0xff);
+	}
+}
+
+// Bank switch: window <bank> is remapped to M_ROM + size*(porthi & mask).
+// Window/bank geometry (see gngeo cpu_z80_switchbank):
+//   bank 0 -> 0x8000, 16KB, mask 0x0f   bank 1 -> 0xC000, 8KB,  mask 0x1f
+//   bank 2 -> 0xE000, 4KB,  mask 0x3f   bank 3 -> 0xF000, 2KB,  mask 0x7f
+// Z80 read page map (see z80.h rmap): one pre-biased host pointer per 256-byte
+// page, mirroring z80_read's decode exactly. Every window is page-aligned, so
+// the map is exact; it is rebuilt at reset and per window on bank switch.
+#define z80_rmap z80_hot.rmap
+static const uint8_t win_lo[4] = { 0x80, 0xC0, 0xE0, 0xF0 };   // window page ranges
+static const uint8_t win_hi[4] = { 0xC0, 0xE0, 0xF0, 0xF8 };
+static void rmap_fill(unsigned lo, unsigned hi, const uint8_t *base) {
+	const uintptr_t b = (uintptr_t)base - ((uintptr_t)lo << 8);
+	for (unsigned p = lo; p < hi; p++) z80_rmap[p] = b;
+}
+static void rmap_rebuild(void) {
+	rmap_fill(0x00, 0x80, M_ROM);
+	for (int w = 0; w < 4; w++) rmap_fill(win_lo[w], win_hi[w], z80_bank[w]);
+	rmap_fill(0xF8, 0x100, z80_ram);
+	cpu.rmap = z80_rmap;
+}
+
+static void switchbank(int bank, uint16_t port) {
+	static const uint32_t bsize[4] = { 0x4000, 0x2000, 0x1000, 0x0800 };
+	static const uint32_t bmask[4] = { 0x0f, 0x1f, 0x3f, 0x7f };
+	uint32_t off = bsize[bank] * ((port >> 8) & bmask[bank]);
+	if (off < m_rom_size) {
+		z80_bank[bank] = M_ROM + off;
+		rmap_fill(win_lo[bank], win_hi[bank], z80_bank[bank]);
+	}
+}
+
+// --- Z80 bus ---------------------------------------------------------------
+// NOTE (2026-07-09): inlining this map into z80.c's rb/wb (killing the
+// function-pointer call per byte access) was implemented, WAV-verified
+// bit-exact, and MEASURED WORSE on N64: us/Z80-step 3.29 -> 3.62 (+10%),
+// snd +2-4 points, in-fight fps -1..-1.8. The 6-branch decode inlined into
+// hundreds of rb/wb sites across the opcode switch blew the icache, while
+// the callback keeps it in one hot line — same lesson class as the -O3
+// audio regression. The Z80's ~300 host cycles/step is cache behavior, not
+// call overhead. Don't retry inline-bus; attack step count / locality.
+// (Reads later went inline in a different shape that did pay off: the
+// branchless rmap page table in z80.h, 33dc60c. z80_read below now only
+// serves the callback API and the idle-spin peek.)
+static uint8_t z80_read(void *ud, uint16_t addr) {
+	(void)ud;
+	if (addr < 0x8000) return M_ROM[addr];               // fixed first 32KB
+	if (addr < 0xC000) return z80_bank[0][addr - 0x8000];
+	if (addr < 0xE000) return z80_bank[1][addr - 0xC000];
+	if (addr < 0xF000) return z80_bank[2][addr - 0xE000];
+	if (addr < 0xF800) return z80_bank[3][addr - 0xF000];
+	return z80_ram[addr - 0xF800];
+}
+
+static void z80_write(void *ud, uint16_t addr, uint8_t val) {
+	(void)ud;
+	if (addr >= 0xF800) z80_ram[addr - 0xF800] = val;    // only work RAM is writable
+	z80_wrote = 1;                                        // taints idle-skip window
+}
+
+static uint8_t z80_in(z80 *z, uint16_t port) {
+	(void)z;
+	switch (port & 0xff) {
+	case 0x00: pending_command = 0; return sound_code;   // read command, ack
+	case 0x04: return YM2610Read(0);                     // YM2610 status A
+	case 0x05: return YM2610Read(1);                     // YM2610 read port
+	case 0x06: return YM2610Read(2);                     // YM2610 status B
+	case 0x08: switchbank(3, port); return 0;
+	case 0x09: switchbank(2, port); return 0;
+	case 0x0a: switchbank(1, port); return 0;
+	case 0x0b: switchbank(0, port); return 0;
+	}
+	return 0;
+}
+
+static void z80_out(z80 *z, uint16_t port, uint8_t val) {
+	(void)z;
+	z80_wrote = 1;                                        // taints idle-skip window
+	switch (port & 0xff) {
+	case 0x04: YM2610Write(0, val);
+		break;                                           // control A
+	case 0x05: YM2610Write(1, val);
+		break;                                           // data A
+	case 0x06: YM2610Write(2, val);
+		break;                                           // control B
+	case 0x07: YM2610Write(3, val);
+		break;                                           // data B
+	case 0x0c: result_code = val; break;                 // reply to 68k
+	}
+}
+
+// --- sound.h seam ----------------------------------------------------------
+void sound_init(void) {
+	snd_dbg = getenv("MVS64_SNDDBG") != NULL;
+	if (!M_ROM || m_rom_size == 0) {
+		z80_active = 0;
+		plat_log("[SND] no m.rom; sound disabled\n");
+		return;
+	}
+	z80_init(&cpu);
+	cpu.read_byte  = z80_read;
+	cpu.write_byte = z80_write;
+	cpu.port_in    = z80_in;
+	cpu.port_out   = z80_out;
+	cpu.rmap = z80_rmap;   // filled by sound_reset() below, before any step
+#ifdef MVS64_CYCWRAP_TEST
+	// Wrap-gate rig — see the twin block in sound_reset().
+	cpu.cyc = 0xFFFFFFFFul - 4000000ul * 120ul;
+	plat_log("[CYCWRAP] cyc parked at %08lx (wrap in ~120s of audio)\n",
+	         (unsigned long)cpu.cyc);
+#endif
+
+	// ADPCM sample sources. Most sets have one V-ROM shared by ADPCM-A and
+	// ADPCM-B (as on real NeoGeo); some early sets have a separate ADPCM-B ROM,
+	// which mvsmakerom writes as vb.rom. Resident when RAM allows (PC build);
+	// otherwise STREAMED per voice through the vwin window caches above — a
+	// NULL buffer with a size > 0 selects streaming inside the YM2610 core
+	// (ym2610_vrom_fetch). A resident multi-MB V-ROM does not fit the N64 heap.
+	unsigned adpcma_size = v_rom_size;
+	unsigned adpcmb_size = vb_rom_size ? vb_rom_size : v_rom_size;
+	if (v_rom_size) {
+#ifdef N64
+		plat_log("[SND] N64: V-ROM streamed from cart (A %u, B %u bytes%s)\n",
+			adpcma_size, adpcmb_size, vb_rom_size ? ", separate" : ", shared");
+#else
+		if (getenv("MVS64_STREAM_ADPCM")) {
+			// A/B: exercise the N64 streaming path on the PC build; the WAV
+			// must be byte-identical to the resident path.
+			plat_log("[SND] MVS64_STREAM_ADPCM: V-ROM streamed (%u bytes)\n", v_rom_size);
+		} else {
+			vrom_resident = malloc(v_rom_size);
+			vromb_resident = vb_rom_size ? malloc(vb_rom_size) : vrom_resident;
+			if (vrom_resident && vromb_resident) {
+				vrom_read(0, vrom_resident, v_rom_size);
+				if (vb_rom_size) vromb_read(0, vromb_resident, vb_rom_size);
+				plat_log("[SND] V-ROM resident: A %u, B %u bytes\n", adpcma_size, adpcmb_size);
+			} else {
+				free(vrom_resident);
+				if (vb_rom_size) free(vromb_resident);
+				vrom_resident = vromb_resident = NULL;
+				plat_log("[SND] V-ROM alloc failed; streaming ADPCM\n");
+			}
+		}
+#endif
+	}
+	YM2610Init(YM_CLOCK, AUDIO_RATE,
+		vrom_resident, adpcma_size,    // ADPCM-A (NULL buf + size>0 = streamed)
+		vromb_resident, adpcmb_size,   // ADPCM-B (v.rom again unless vb.rom)
+		ym_timer_handler, ym_irq_handler);
+
+	sound_reset();
+	z80_active = 1;
+	plat_log("[SND] Z80 sound CPU init (m.rom %u bytes)\n", m_rom_size);
+}
+
+void sound_reset(void) {
+	// Initial 1:1 window mapping (matches gngeo cpu_z80_init).
+	z80_bank[0] = M_ROM + 0x8000;
+	z80_bank[1] = M_ROM + 0xC000;
+	z80_bank[2] = M_ROM + 0xE000;
+	z80_bank[3] = M_ROM + 0xF000;
+	memset(z80_ram, 0, sizeof(z80_ram));
+	sound_code = result_code = pending_command = 0;
+	ym_timer_on[0] = ym_timer_on[1] = 0;
+	z80_init(&cpu);
+	cpu.read_byte  = z80_read;
+	cpu.write_byte = z80_write;
+	cpu.port_in    = z80_in;
+	cpu.port_out   = z80_out;
+	rmap_rebuild();
+#ifdef MVS64_CYCWRAP_TEST
+	// Gate rig for the 2^32 cycle-counter wrap (the 17.9-minute permanent
+	// silence): park cyc ~2 minutes of audio time before the wrap so a short
+	// ares run crosses it during attract music. Unfixed builds freeze the
+	// Z80 forever at the crossing; fixed builds play straight through.
+	cpu.cyc = 0xFFFFFFFFul - 4000000ul * 120ul;
+	plat_log("[CYCWRAP] cyc parked at %08lx (wrap in ~120s of audio)\n",
+	         (unsigned long)cpu.cyc);
+#endif
+	YM2610Reset();
+}
+
+
+void sound_write_command(uint8_t cmd) {
+	sound_code = cmd;
+	pending_command = 1;
+	if (!z80_active) return;
+	// On N64 this runs inside the TLB/MMIO exception handler (68k sound-latch
+	// write). The NeoGeo BIOS busy-waits for the reply, so the run must stay
+	// synchronous. That is safe ONLY because the whole Z80+YM2610 command path
+	// is now integer-only (the YM core precomputes its double math at init:
+	// TimerBase_cyc8 / adpcma_step_base / freqbase16) — the handler leaves the
+	// FPU disabled (SR.CU1 clear, no FP context saved), and the previous
+	// mfc0/mtc0 CU1-re-enable trick had an unhandled CP0 hazard window that
+	// wedged Mupen (BizHawk) at the first sound command (~frame 537) and was
+	// fragile on real hardware.
+	//
+	// Deliver the NMI the way real-hardware timing would: never into the middle
+	// of another handler. The audio pump stops the Z80 wherever its cycle budget
+	// runs out — routinely INSIDE the YM-timer IRQ tick handler (~5 music ticks
+	// per audio buffer), which is exactly the code that maintains channel state
+	// and issues SSG/FM note-offs. The old fixed z80_run(300) injected the
+	// command NMI right there, and the command processing trampled the tick
+	// handler's half-updated state: the note-off for the live SSG chord was
+	// never issued and the tone latched on forever (the stuck boot beep /
+	// character-select chord). On real hardware the Z80 runs continuously, so
+	// an NMI landing mid-tick is a microsecond-window fluke the driver
+	// tolerates; our chunked execution made it near-certain during command
+	// bursts. So: (1) if the Z80 is inside a handler or DI section (IFF1
+	// clear), first let it run back to EI/main-loop; (2) inject the NMI;
+	// (3) run the NMI handler to COMPLETION (RETN restores IFF1), so the 68k's
+	// busy-wait sees the real reply and never re-sends into a half-done
+	// handler. Both runs are cycle-capped so a driver phase that parks with DI
+	// (the boot jingle's RAM wait loop) cannot stall the 68k exception handler;
+	// on cap we inject/return anyway, which is exactly the old behavior.
+	// NOTE on every cyc loop bound in this file: cpu.cyc is 32-bit on N64 and
+	// WRAPS after 2^32 Z80 cycles = 17.9 minutes of audio time. A magnitude
+	// compare (cyc < bound) fails closed at the wrap — bound overflows small,
+	// the loop never runs, and since stepping is the only thing that advances
+	// cyc the Z80 freezes FOREVER (2026-08-30 permanent-silence postmortem:
+	// both the hardware and ares deaths integrate to exactly 2^32 cycles).
+	// All bounds therefore use the wrap-safe signed-distance form.
+	if (!cpu.iff1 && !cpu.halted) {   // a DI+HALT park only an NMI can wake:
+		unsigned long cap = cpu.cyc + 1500;   // don't burn the cap stepping it
+		while ((long)(cap - cpu.cyc) > 0 && !cpu.iff1 && !cpu.halted)
+			z80_step(&cpu);
+	}
+	z80_gen_nmi(&cpu);
+	{
+		unsigned long cap = cpu.cyc + 8000;
+		while ((long)(cap - cpu.cyc) > 0 && (cpu.nmi_pending || !cpu.iff1)) {
+			z80_service_level_irq();
+			z80_step(&cpu);
+		}
+	}
+}
+
+uint8_t sound_read_status(void) {
+	return result_code;
+}
+
+static void emit(int16_t *out, int from, int count) {
+	YM2610Update_stream(count);
+#ifdef N64
+	// `out` is an UNCACHED AI buffer: every store is a separate RDRAM
+	// transaction, so pack each stereo frame into ONE 32-bit store (big-endian:
+	// high half = left = out[0]) — halves the uncached traffic vs two 16-bit
+	// stores. A stereo frame is 4 bytes, so out+from*2 is always 4-aligned.
+	{
+		uint32_t *dst = (uint32_t *)(out + from * 2);
+		for (int i = 0; i < count; i++)
+			dst[i] = ((uint32_t)play_buffer[i * 2 + 0] << 16) | play_buffer[i * 2 + 1];
+	}
+#else
+	for (int i = 0; i < count; i++) {
+		out[(from + i) * 2 + 0] = (int16_t)play_buffer[i * 2 + 0];
+		out[(from + i) * 2 + 1] = (int16_t)play_buffer[i * 2 + 1];
+	}
+#endif
+}
+
+int sound_gen_samples(int16_t *out, int nsamples) {
+	if (!z80_active) {
+		memset(out, 0, (size_t)nsamples * 2 * sizeof(int16_t));
+		return nsamples;
+	}
+
+	// Rate-agnostic: "nsamples" always means exactly nsamples/AUDIO_RATE seconds
+	// of Z80+YM2610 time, derived from the requested sample count rather than a
+	// hardcoded 1/60s. This lets the N64 backend drive us at the true 44100 Hz AI
+	// rate (any buffer length) so music plays at correct pitch AND tempo even when
+	// the 68k frame loop is slow. At nsamples=735 cyc_budget == Z80_CYCLES_PER_FRAME
+	// exactly, so the PC/SDL and headless paths are byte-identical to before.
+	// Sustained-underrun silence: keep running the Z80 (handshake/timers) but skip
+	// the YM2610 synthesis and output zeros. The buffer is pre-zeroed; every emit()
+	// below is gated on !silent so nothing overwrites it.
+	const int silent = sound_silent;
+	if (silent) memset(out, 0, (size_t)nsamples * 2 * sizeof(int16_t));
+
+	const unsigned long frame_start = cpu.cyc;
+	const unsigned long cyc_budget  =
+		(unsigned long)((unsigned long long)nsamples * Z80_CLOCK / AUDIO_RATE);
+	const unsigned long frame_end   = cpu.cyc + cyc_budget;
+	int produced = 0;
+
+	uint16_t last_back = 0xFFFF;        // idle-skip: target of previous back-branch
+	struct z80snap spin_snap = {0,0,0}; // registers at last_back last time we hit it
+	                                    // (zero-init only quiets maybe-uninitialized:
+	                                    // every compare is guarded by spin_armed)
+	int spin_armed = 0;                 // snapshot valid + no writes since it taken
+
+	while ((long)(frame_end - cpu.cyc) > 0) {   // wrap-safe (see NMI note)
+		// Service any due FM timers first (re-arms them forward + raises IRQ).
+		// Wrap-safe signed compare: cpu.cyc is 32-bit on N64 and wraps at ~17min
+		// once it advances at the true ~4MHz rate (deltas here are tiny, <budget).
+		for (int c = 0; c < 2; c++)
+			if (ym_timer_on[c] && (long)(cpu.cyc - ym_timer_deadline[c]) >= 0) {
+				YM2610TimerOver(c);
+			}
+
+		// Next event boundary = nearest future timer deadline, else end of budget.
+		// We run the Z80 up to it, idle-skipping any interrupt-wait spin (so we
+		// don't single-step 4 MHz of wait loop). The timer fires exactly at the
+		// deadline, so tempo stays correct; emit() below renders the FM audio for
+		// the whole span whether stepped or skipped.
+		unsigned long next = frame_end;
+		for (int c = 0; c < 2; c++)
+			if (ym_timer_on[c] && (long)(ym_timer_deadline[c] - cpu.cyc) > 0 &&
+			    (long)(ym_timer_deadline[c] - next) < 0)
+				next = ym_timer_deadline[c];
+
+		while ((long)(next - cpu.cyc) > 0) {   // wrap-safe (see NMI note)
+			z80_service_level_irq();   // must precede the HALT check: a
+			                           // re-delivered tick wakes a halted CPU
+#ifndef MVS64_NOIDLESKIP
+			// A HALTed Z80 with nothing deliverable pending is pure dead time,
+			// but it defeats the back-branch idle-skip below (HALT never
+			// branches: each z80_step burns a flat 4 cycles in place) — the
+			// boot jingle's DI/HALT park cost ~1M single-steps per wall second,
+			// most of the boot-window Z80 load. Fast-forwarding to the next
+			// event boundary is EXACT, not heuristic: the only wake sources are
+			// the YM timer IRQ (which bounds `next`) and the command NMI
+			// (which arrives between pump calls). A pending-but-masked IRQ
+			// (DI+HALT) cannot wake it either — only an NMI can.
+			if (cpu.halted && !cpu.nmi_pending &&
+			    (!cpu.int_pending || !cpu.iff1)) {
+				cpu.cyc = next;
+				break;
+			}
+#endif
+			uint16_t pc0 = cpu.pc;
+			z80_wrote = 0;
+			z80_step_inline(&cpu);
+			if (z80_wrote) spin_armed = 0;      // any write breaks the pure spin
+#ifndef MVS64_NOIDLESKIP
+			// Self-jump spin (JP $ / JR $): the back-branch detector below
+			// never sees it (pc == pc0, not <), so the boot jingle's DI park
+			// at JP $FFFD was single-stepped flat out — ~half of ALL Z80
+			// steps in a boot+fight run. Fast-forward it BIT-EXACTLY: each
+			// iteration is exactly {cyc += c, R += 1} (pc/mem_ptr already
+			// fixed points), and nothing can interrupt it before `next` when
+			// no NMI is pending and the maskable path can't fire (IFF1 clear,
+			// or no pending/level-held IRQ) — so k iterations land cyc on the
+			// same overshoot stepping would, with the same R.
+			if (cpu.pc == pc0 && !z80_wrote && !cpu.halted && !cpu.iff_delay &&
+			    !cpu.nmi_pending &&
+			    !(cpu.iff1 && (cpu.int_pending || ym_irq_level))) {
+				uint8_t op = z80_read(NULL, pc0);
+				unsigned c = op == 0xC3 ? 10 : op == 0x18 ? 12 : 0;
+				long rem = (long)(next - cpu.cyc);
+				if (c && rem > 0) {
+					unsigned long k = ((unsigned long)rem + c - 1) / c;
+					cpu.cyc += k * c;
+					cpu.r = (uint8_t)((cpu.r & 0x80) | ((cpu.r + k) & 0x7f));
+					break;
+				}
+			}
+#endif
+			if (cpu.pc < pc0) {                 // backward branch = loop edge
+				if (cpu.pc == last_back) {      // repeated target = candidate spin
+					// NOTE: do not gate this behind a repeat threshold. Delaying
+					// the skip changes where cpu.cyc lands when the budget/timer
+					// boundary arrives mid-spin (a natural step OVERSHOOTS
+					// `next` by instruction granularity; the skip lands exactly
+					// on it), which shifts YM timer phase = audible divergence.
+					// Measured: a >=8-repeat gate broke the byte-identical WAV.
+					struct z80snap now; z80_snap(&now, &cpu);
+					if (spin_armed && z80_snap_eq(&now, &spin_snap)) {
+#ifndef MVS64_NOIDLESKIP
+						cpu.cyc = next;         // identical iteration -> jump to event
+						break;
+#endif
+					}
+					spin_snap = now; spin_armed = 1;   // seed/refresh for next compare
+				} else {
+					last_back = cpu.pc; spin_armed = 0;  // new target: cheap path
+				}
+			}
+		}
+
+		// Generate samples up to the cycle-proportional point in the budget.
+		int target = (int)((unsigned long long)(cpu.cyc - frame_start) *
+		                    nsamples / cyc_budget);
+		if (target > nsamples) target = nsamples;
+		if (target > produced) { if (!silent) emit(out, produced, target - produced); produced = target; }
+	}
+	if (produced < nsamples && !silent) emit(out, produced, nsamples - produced);
+
+
+	if (snd_dbg)
+		plat_log("[SND] z80 pc=%04x code=%02x result=%02x timers=%d%d s0=%d\n",
+			cpu.pc, sound_code, result_code, ym_timer_on[0], ym_timer_on[1],
+			(int)play_buffer[0]);
+
+	return nsamples;
+}

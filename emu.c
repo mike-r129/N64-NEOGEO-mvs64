@@ -11,6 +11,7 @@
 #include "video.h"
 #include "roms.h"
 #include "platform.h"
+#include "sound.h"
 
 static int cpu_trace_count = 0;
 void cpu_trace(unsigned int pc) {
@@ -252,8 +253,11 @@ int main(int argc, char *argv[]) {
 	argc = 0; argv = NULL;
 	#endif
 
-	plat_init(44100, FPS);
+	plat_init(MVS64_AUDIO_RATE, FPS);
 	plat_enable_video(true);
+	#ifndef N64
+	plat_enable_audio(1);
+	#endif
 
 	#ifdef N64
 	rom_load("rom:/");
@@ -295,6 +299,16 @@ int main(int argc, char *argv[]) {
 		#endif
 		emu_run_frame();
 		if (!plat_poll()) break;
+
+		#ifndef N64
+		// Produce one video-frame's worth of audio through the sound seam.
+		{
+			int16_t *abuf; int an;
+			plat_beginaudio(&abuf, &an);
+			sound_gen_samples(abuf, an);
+			plat_endaudio();
+		}
+		#endif
 
 		#ifdef N64
 		uint32_t emu_time = TICKS_DISTANCE(t0, TICKS_READ());

@@ -9,7 +9,7 @@ BUILD_DIR = build/mvs64
 
 include $(N64_INST)/include/n64.mk
 
-core_src = emu.c roms.c hw.c video.c platform_n64.c sprite_cache.c lib/rdl.c $(wildcard hle_*.c)
+core_src = emu.c roms.c hw.c video.c platform_n64.c sprite_cache.c sound_neogeo.c z80_anchor.c z80.c ym2610/ym2610.c lib/rdl.c $(wildcard hle_*.c)
 rsp = rsp_video.S
 ifdef MUSASHI
 # Fallback 68k core: portable Musashi (the PC build's core). Much slower than
@@ -29,6 +29,17 @@ src_makerom = mvsmakerom.c miniz.c
 obj_makerom = $(src_makerom:%.c=$(BUILD_DIR)/%.o)
 
 CFLAGS += -Wno-unused-function
+CFLAGS += $(EXTRA_DEFINES)
+# Propagate EXTRA_DEFINES to the assembler too, so .S-file feature gates
+# take effect like C ones.
+ASFLAGS += $(EXTRA_DEFINES)
+N64_ASFLAGS += $(EXTRA_DEFINES)
+
+# NOTE: the audio TUs (ym2610.c/z80.c/sound_neogeo.c) stay at -O2, measured
+# both ways on N64: -O3 made in-game sound time ~40% worse (the inline/unroll
+# bloat thrashes the VR4300 16KB icache in the synthesis loop), and -Os was
+# also slower (shorter but branchier code loses more in the synthesis inner
+# loops than the icache saves).
 
 ROMNAME=$(notdir $(basename $(ROM)))
 ROMDIR=$(ROM:%.zip=%.n64)

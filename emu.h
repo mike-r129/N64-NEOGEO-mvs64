@@ -13,6 +13,22 @@
 #define MVS_CLOCK         24000000
 #define M68K_CLOCK_DIV    2
 #define FPS        		  60
+
+// Audio output sample rate (Hz). The AI plays at this rate and the YM2610 is
+// generated for it (sound_neogeo.c keys cyc_budget off this), so the two MUST
+// match — define it in one place. On N64, real-time YM2610 FM synthesis is
+// the dominant audio cost and scales with the sample rate, so the N64 build
+// defaults to a lower rate to keep the framerate up. Measured (samsho2, ares,
+// with the Z80 idle-skip): 44100~5fps, 22050~6.5fps, 11025~13fps steady.
+// 11025 keeps NeoGeo FM music clearly recognizable while preserving playable
+// speed. Override with EXTRA_DEFINES=-DMVS64_AUDIO_RATE=N.
+#ifndef MVS64_AUDIO_RATE
+#ifdef N64
+#define MVS64_AUDIO_RATE  11025
+#else
+#define MVS64_AUDIO_RATE  44100
+#endif
+#endif
 #define FRAME_CLOCK       (MVS_CLOCK / FPS)
 #define LINE_CLOCK        (FRAME_CLOCK / 264)
 #define WATCHDOG_PERIOD   3244030

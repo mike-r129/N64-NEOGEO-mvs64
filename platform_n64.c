@@ -1,5 +1,16 @@
 #include "platform.h"
 #include <memory.h>
+#include <stdio.h>
+#include <stdarg.h>
+
+// Telemetry logger — see platform.h. Writes to the libdragon debug channels
+// (USB + emulator ISViewer, via stderr/debugf).
+void plat_log(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+}
 
 volatile int N64_FRAME = 0;
 uint32_t RSP_OVL_ID = 0;
