@@ -712,7 +712,7 @@ asm_pbrom_bankno_w:
 	add k1, t6
 	and k1, 0xFFFFFF
 	srl k1, 6
-	ori k1, 3    # global, valid
+	ori k1, (3<<3) | 3    # cacheable-noncoherent, global, valid
 	mtc0 k1, C0_ENTRYLO0; 	nop; nop
 
 	# write back the new TLB entry
