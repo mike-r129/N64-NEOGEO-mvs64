@@ -77,6 +77,12 @@ pc_diff:      .long 0
 m64k_idle_pagemask: .long 0
     .globl m64k_idle_pcs
 m64k_idle_pcs:      .space 4*(M64K_IDLE_MAX+1)
+#ifdef M64K_BLOCKOPS
+# 1 when the PB-ROM bank window [0x200000,0x300000) is linearly TLB-mapped
+# (set by hw_init), so the long copy may read from it; 0 in cache mode.
+    .globl mvs64_blockop_pbrom_ok
+mvs64_blockop_pbrom_ok: .long 0
+#endif
 #ifdef MVS64_IDLEPROBE
 # Idle-spin probe: detects a branch/jump target hit many times CONSECUTIVELY
 # (a true wait-for-IRQ spin) vs a bounded backward loop (memcpy/DBRA). The PC
@@ -3630,7 +3636,322 @@ dbcc_dec:
     #endif
     lh t3, -2(m_pc)
     addiu t3, -2
+#ifdef M64K_BLOCKOPS
+    # Fused block-op fast path for single-instruction DBF copy/fill loops.
+    #
+    # Loop shape: a 1-word body followed by the 2-word DBF. With
+    # dispatch_body's "addi m_pc,2" plus OP(dbcc)'s own, m_pc sits at
+    # body+6 when t3 is formed, so the self-loop delta is -6 and the body
+    # opcode is at -6(m_pc). (-4 would be a DBF branching to itself, a
+    # zero-body "dbra dn,*" delay loop.)
+    #
+    # Games spend several % of every frame in "move.w (As)+,(Ad)" uploads
+    # to the LSPC VRAM data port (one TLB exception per word on N64) and in
+    # "move.w/l Dn,(Ad)+" RAM fills, all shaped as 2-word DBRA self-loops.
+    # Execute up to count-1 iterations natively with identical cycle charges;
+    # the final (expiring) iteration and any budget tail always run through
+    # the normal interpreter, so flags, PC and register state at every
+    # observable boundary are bit-exact. Restricted to DBF (cc can never
+    # become true mid-loop; other DBcc react to flags the body changes).
+    bne t3, -6, dbcc_no_blockop        # 1-word body + 2-word DBF only
+    andi t2, opcode, 0x0F00
+    bne t2, 0x0100, dbcc_no_blockop    # DBF only
+    addi t2, t0, -1                    # fast-loopable iterations (keep last)
+    blez t2, dbcc_no_blockop
+    lhu t9, -6(m_pc)                   # body opcode
+    andi t1, t9, 0xF1F8
+    beq t1, 0x3098, blockop_movew_port # move.w (As)+,(Ad)
+    beq t1, 0x30C0, blockop_fill_w     # move.w Dn,(Ad)+
+    beq t1, 0x20C0, blockop_fill_l     # move.l Dn,(Ad)+
+    beq t1, 0x20D8, blockop_copy_l     # move.l (As)+,(Ad)+
+    beq t1, 0x3080, blockop_fillw_port # move.w Dn,(Ad)
+dbcc_no_blockop:
+#endif
     j branch_exec
+
+#ifdef M64K_BLOCKOPS
+blockop_movew_port:
+    # Destination (An) must be the LSPC VRAM data port (0x3C0002): the only
+    # (An)-fixed-destination copy games run hot, and the expensive one.
+    srl t1, t9, 7
+    andi t1, 7<<2
+    lw_ctx t1, M64K_OFF_AREGS,t1       # Ad
+    sll t1, 8
+    srl t1, 8                          # 24-bit address
+    li result, 0x003C0002
+    bne t1, result, dbcc_no_blockop
+    # Budget: K = min(count-1, (m_cycles-11)/22); keeps m_cycles > 0 so the
+    # interpreter always resumes at the loop body. 22 = move.w (An)+,(An)
+    # [12] + taken dbra [10], matching the interpreter's own charges.
+    addi result, m_cycles, -11
+    blez result, dbcc_no_blockop
+    li t8, 22
+    divu zero, result, t8
+    mflo result
+    beqz result, dbcc_no_blockop
+    ble t2, result, 1f
+    move t2, result
+1:  # Source (As)+ span must stay inside the always-mapped P-ROM + work-RAM
+    # window (< 0x110000): a native lhu there can never TLB-fault.
+    andi t1, t9, 7
+    sll t1, 2
+    la_ctx t9, M64K_OFF_AREGS,t1       # &As
+    lw t8, 0(t9)                       # As (full register value)
+    sll t1, t8, 8
+    srl t1, 8                          # 24-bit source address
+    sll result, t2, 1                  # 2K bytes
+    addu result, t1
+    li eaptr32, 0x00110000
+    bgt result, eaptr32, dbcc_no_blockop
+    sll result, t2, 1                  # As += 2K
+    addu t8, result
+    sw t8, 0(t9)
+    sub t8, t0, t2                     # counter = (old-1) - K
+    addi t8, -1
+    sh t8, 2(dptr)
+    li t8, 22                          # m_cycles -= 10 + 22K
+    multu t2, t8
+    mflo t8
+    sub m_cycles, t8
+    addi m_cycles, -10
+    addi m_pc, -6                      # resume at the loop body
+    map_m68k t1                        # t1 = mapped src, t2 = count
+    jal mvs64_blockop_vram_copy_w
+    j main_loop
+
+blockop_fill_w:
+    # value = Dn.w
+    andi t1, t9, 7
+    sll t1, 2
+    la_ctx t1, M64K_OFF_DREGS,t1
+    lhu result, 2(t1)
+    # Budget: 18 = move.w Dn,(An)+ [8] + taken dbra [10]
+    addi t1, m_cycles, -11
+    blez t1, dbcc_no_blockop
+    li t8, 18
+    divu zero, t1, t8
+    mflo t1
+    beqz t1, dbcc_no_blockop
+    ble t2, t1, 1f
+    move t2, t1
+1:  # Destination (Ad)+ span must stay inside work RAM [0x100000,0x110000)
+    srl t1, t9, 7
+    andi t1, 7<<2
+    la_ctx t9, M64K_OFF_AREGS,t1       # &Ad
+    lw t8, 0(t9)                       # Ad (full register value)
+    sll t1, t8, 8
+    srl t1, 8                          # 24-bit dest address
+    li eaptr32, 0x00100000
+    blt t1, eaptr32, dbcc_no_blockop
+    sll t7, t2, 1
+    addu t7, t1
+    li eaptr32, 0x00110000
+    bgt t7, eaptr32, dbcc_no_blockop
+    # ---- commit ----
+    sll t7, t2, 1                      # Ad += 2K
+    addu t8, t7
+    sw t8, 0(t9)
+    sub t7, t0, t2                     # counter = (old-1) - K
+    addi t7, -1
+    sh t7, 2(dptr)
+    li t7, 18                          # m_cycles -= 10 + 18K
+    multu t2, t7
+    mflo t7
+    sub m_cycles, t7
+    addi m_cycles, -10
+    addi m_pc, -6                      # resume at the loop body
+    map_m68k t1                        # native fill (work RAM: mapped RW)
+1:  sh result, 0(t1)
+    addiu t1, 2
+    addiu t2, -1
+    bnez t2, 1b
+    j main_loop
+
+blockop_fill_l:
+    # value = Dn (32-bit)
+    andi t1, t9, 7
+    sll t1, 2
+    la_ctx t1, M64K_OFF_DREGS,t1
+    lw result, 0(t1)
+    # Budget: 26 = move.l Dn,(An)+ as m64k charges it [16] + taken dbra [10]
+    addi t1, m_cycles, -11
+    blez t1, dbcc_no_blockop
+    li t8, 26
+    divu zero, t1, t8
+    mflo t1
+    beqz t1, dbcc_no_blockop
+    ble t2, t1, 1f
+    move t2, t1
+1:  # Destination (Ad)+ span must stay inside work RAM [0x100000,0x110000)
+    srl t1, t9, 7
+    andi t1, 7<<2
+    la_ctx t9, M64K_OFF_AREGS,t1       # &Ad
+    lw t8, 0(t9)                       # Ad (full register value)
+    sll t1, t8, 8
+    srl t1, 8                          # 24-bit dest address
+    li eaptr32, 0x00100000
+    blt t1, eaptr32, dbcc_no_blockop
+    sll t7, t2, 2
+    addu t7, t1
+    li eaptr32, 0x00110000
+    bgt t7, eaptr32, dbcc_no_blockop
+    # ---- commit ----
+    sll t7, t2, 2                      # Ad += 4K
+    addu t8, t7
+    sw t8, 0(t9)
+    sub t7, t0, t2                     # counter = (old-1) - K
+    addi t7, -1
+    sh t7, 2(dptr)
+    li t7, 26                          # m_cycles -= 10 + 26K
+    multu t2, t7
+    mflo t7
+    sub m_cycles, t7
+    addi m_cycles, -10
+    addi m_pc, -6                      # resume at the loop body
+    map_m68k t1
+    srl t3, result, 16                 # high word first (68k byte order;
+1:  sh t3, 0(t1)                       #  2-byte stores keep any even address
+    sh result, 2(t1)                   #  legal, matching the 68000 bus)
+    addiu t1, 4
+    addiu t2, -1
+    bnez t2, 1b
+    j main_loop
+
+blockop_copy_l:
+    # move.l (As)+,(Ad)+ / dbf: a block-unpack memcpy (count word from a
+    # stream, longs copied ROM/RAM -> work RAM). Copies to palette RAM are
+    # trapped MMIO and stay interpreted (the destination check below).
+    # As = bits 2-0, Ad = bits 11-9. The same-register form (e.g. 0x20D8
+    # proper, move.l (a0)+,(a0)+) interleaves the two pointer bumps and does
+    # NOT have memcpy semantics: reject it. NOTE: every reject path below
+    # must leave t3 intact (branch_exec consumes it).
+    srl t7, t9, 7
+    andi t7, 7<<2                      # Ad index*4
+    andi t1, t9, 7
+    sll t1, 2                          # As index*4
+    beq t1, t7, dbcc_no_blockop
+    la_ctx t1, M64K_OFF_AREGS,t1       # &As
+    la_ctx t7, M64K_OFF_AREGS,t7       # &Ad
+    # Budget: K = min(count-1, (m_cycles-11)/30); keeps m_cycles > 0 so the
+    # interpreter always resumes at the loop body. 30 = move.l (As)+,(Ad)+
+    # [12 entry + 4 src (An)+ + 4 dst (An)+] + taken dbra [10], matching the
+    # interpreter's own charges (charge placement inside the fused span is
+    # unobservable: both spans are guarded RAM/ROM and can never trap).
+    addi t9, m_cycles, -11
+    blez t9, dbcc_no_blockop
+    li t8, 30
+    divu zero, t9, t8
+    mflo t9
+    beqz t9, dbcc_no_blockop
+    ble t2, t9, 1f
+    move t2, t9
+1:  lw t8, 0(t1)                       # As (full register value)
+    lw t9, 0(t7)                       # Ad (full register value)
+    or result, t8, t9                  # an odd long access would raise an
+    andi result, 1                     #  address error in the interpreter:
+    bnez result, dbcc_no_blockop       #  leave those loops interpreted
+    # Source span must stay inside an always-mapped window: P-ROM + work RAM
+    # (< 0x110000) or, when it is linearly mapped, the PB-ROM bank window
+    # [0x200000,0x300000), where games with a P-ROM over 1 MB keep the rest
+    # of it (unpack loops reading it are common). In cache mode (a P-ROM too
+    # big for RAM) that window is not mapped and reads there trap, so it is
+    # rejected (mvs64_blockop_pbrom_ok, set by hw_init). The bank mapping
+    # can only change via an MMIO write, which the 1-insn loop body cannot
+    # issue, so the window is stable across the fused span. (SMA protection
+    # registers in 0x2Fxxxx are not emulated; if they ever are, they are
+    # MMIO and must be excluded here too.)
+    sll eaptr32, t8, 8
+    srl eaptr32, 8                     # 24-bit source address (kept for map)
+    sll result, t2, 2                  # 4K bytes
+    addu result, eaptr32
+    li eaptr, 0x00110000
+    ble result, eaptr, 1f              # low window: end <= 0x110000
+    lw eaptr, mvs64_blockop_pbrom_ok
+    beqz eaptr, dbcc_no_blockop        # PB-ROM window not linearly mapped
+    li eaptr, 0x00200000
+    blt eaptr32, eaptr, dbcc_no_blockop # straddles/starts in unmapped gap
+    li eaptr, 0x00300000
+    bgt result, eaptr, dbcc_no_blockop # PB-ROM window: end <= 0x300000
+1:
+    # Destination span must stay inside work RAM [0x100000,0x110000).
+    sll result, t9, 8
+    srl result, 8                      # 24-bit dest address (kept for map)
+    li eaptr, 0x00100000
+    blt result, eaptr, dbcc_no_blockop
+    sll t9, t2, 2
+    addu t9, result
+    li eaptr, 0x00110000
+    bgt t9, eaptr, dbcc_no_blockop
+    sll t9, t2, 2                      # bytes = 4K
+    addu t8, t9                        # As += 4K
+    sw t8, 0(t1)
+    lw t8, 0(t7)
+    addu t8, t9                        # Ad += 4K
+    sw t8, 0(t7)
+    sub t8, t0, t2                     # counter = (old-1) - K
+    addi t8, -1
+    sh t8, 2(dptr)
+    li t8, 30                          # m_cycles -= 10 + 30K
+    multu t2, t8
+    mflo t8
+    sub m_cycles, t8
+    addi m_cycles, -10
+    addi m_pc, -6                      # resume at the loop body
+    map_m68k eaptr32                   # mapped source
+    map_m68k result                    # mapped dest
+1:  lwl t8, 0(eaptr32)                 # unaligned-capable pairs, byte order
+    lwr t8, 3(eaptr32)                 #  identical to lw_m68k/sw_m68k; the
+    swl t8, 0(result)                  #  sequential forward long-by-long
+    swr t8, 3(result)                  #  order matches the interpreter, so
+    addiu eaptr32, 4                   #  overlapping src/dst behave the same
+    addiu result, 4
+    addiu t2, -1
+    bnez t2, 1b
+    j main_loop
+
+blockop_fillw_port:
+    # move.w Dn,(An) / dbf with An = the LSPC VRAM data port (0x3C0002):
+    # a constant-value fill through the port's auto-increment (one TLB
+    # exception per word when interpreted). Same structure as the port
+    # copy: K = count-1 iterations run natively via the hw_n64.S helper
+    # (identical modulo/mask/bank semantics), the expiring iteration and
+    # any budget tail stay interpreted, charges match the interpreter
+    # exactly. NOTE: every reject path must leave t3 intact (branch_exec).
+    srl t1, t9, 7
+    andi t1, 7<<2
+    lw_ctx t1, M64K_OFF_AREGS,t1       # Ad
+    sll t1, 8
+    srl t1, 8                          # 24-bit address
+    li result, 0x003C0002
+    bne t1, result, dbcc_no_blockop
+    # Budget: K = min(count-1, (m_cycles-11)/18); keeps m_cycles > 0 so
+    # the interpreter always resumes at the loop body. 18 = move.w
+    # Dn,(An) [4 entry + 0 Dn + 4 (An)] + taken dbra [10].
+    addi result, m_cycles, -11
+    blez result, dbcc_no_blockop
+    li t8, 18
+    divu zero, result, t8
+    mflo result
+    beqz result, dbcc_no_blockop
+    ble t2, result, 1f
+    move t2, result
+1:  # value = Dn.w (constant across the run: the body cannot change Dn)
+    andi t1, t9, 7
+    sll t1, 2
+    la_ctx t1, M64K_OFF_DREGS,t1
+    lhu t1, 2(t1)                      # 16-bit fill value
+    sub t8, t0, t2                     # counter = (old-1) - K
+    addi t8, -1
+    sh t8, 2(dptr)
+    li t8, 18                          # m_cycles -= 10 + 18K
+    multu t2, t8
+    mflo t8
+    sub m_cycles, t8
+    addi m_cycles, -10
+    addi m_pc, -6                      # resume at the loop body
+    jal mvs64_blockop_vram_fill_w      # t1 = value, t2 = count
+    j main_loop
+#endif
 
 OP(scc):
     andi t0, opcode, 0b111000

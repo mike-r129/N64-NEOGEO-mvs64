@@ -735,6 +735,54 @@ asm_pbrom_r8:
 #define C0_INDEX	$0
 #define C0_ENTRYLO0 $2
 
+# Block-op helper for the m64k DBF fast path (M64K_BLOCKOPS): copy a run of
+# words from an already-mapped N64 pointer to the LSPC VRAM data port
+# (0x3C0002), replicating asm_lspc_vram_data_w semantics (write at
+# bank+addr*2, addr = (addr+modulo) & mask) without taking one TLB
+# exception per word. modulo/mask/bank cannot change mid-run (only port
+# writes change them, and none happen here), so they are hoisted.
+# In:  t1 = source pointer (N64-mapped, even 68k address)
+#      t2 = word count (>= 1)
+# Clobbers: t0-t4, t7, t8, t9. Preserves all m64k fixed regs (incl. t5=m_pc).
+	.global mvs64_blockop_vram_copy_w
+mvs64_blockop_vram_copy_w:
+	lhu t0, %gprel(reg_vram_addr)(gp)
+	lw t3, %gprel(reg_vram_bank)(gp)
+	lhu t8, %gprel(reg_vram_mod)(gp)
+	lhu t9, %gprel(reg_vram_mask)(gp)
+1:	lhu t4, 0(t1)
+	addiu t1, 2
+	sll t7, t0, 1
+	addu t7, t3
+	sh t4, 0(t7)
+	addu t0, t8                       # addr += modulo
+	and t0, t9                        # addr &= mask
+	addiu t2, -1
+	bnez t2, 1b
+	sh t0, %gprel(reg_vram_addr)(gp)
+	jr ra
+
+# Same, but writing one constant value: the "move.w Dn,(An) / dbf" port
+# fill (opcode & 0xF1F8 == 0x3080) that games use to clear VRAM ranges.
+# In:  t1 = 16-bit fill value
+#      t2 = word count (>= 1)
+# Clobbers: t0, t3, t7, t8, t9. Preserves all m64k fixed regs.
+	.global mvs64_blockop_vram_fill_w
+mvs64_blockop_vram_fill_w:
+	lhu t0, %gprel(reg_vram_addr)(gp)
+	lw t3, %gprel(reg_vram_bank)(gp)
+	lhu t8, %gprel(reg_vram_mod)(gp)
+	lhu t9, %gprel(reg_vram_mask)(gp)
+1:	sll t7, t0, 1
+	addu t7, t3
+	sh t1, 0(t7)
+	addu t0, t8                       # addr += modulo
+	and t0, t9                        # addr &= mask
+	addiu t2, -1
+	bnez t2, 1b
+	sh t0, %gprel(reg_vram_addr)(gp)
+	jr ra
+
 asm_pbrom_bankno_w:
 	# Check if the new bank is different from the current one
 	sll t6, 20
