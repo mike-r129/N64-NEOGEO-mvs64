@@ -698,10 +698,11 @@ int main(int argc, char *argv[]) {
 	saveto(bios.SROM, bios.srom_size, outfn);
 
 	const char *ini = game_ini[game.code];
-	if (ini) {
-		strcpy(outfn+off, "game.ini");
+	strcpy(outfn+off, "game.ini");
+	if (ini)
 		saveto(ini, strlen(ini), outfn);
-	}
+	else
+		remove(outfn);   // don't leave a stale one from an earlier conversion
 }
 
 
@@ -715,7 +716,9 @@ int main(int argc, char *argv[]) {
 // find candidates with a -DMVS64_IDLEPROBE build, then check the disassembly
 // before adding them.
 const char* game_ini[65536] = {
-	[GAME_MSLUG]    = "idle_skip=0x1FE2\n",
+	// mslug: no entry. Its main-loop wait at 0x1FE2 bumps a counter on every
+	// pass ("addq.w #1,$106EE0.l" before polling its flags), so skipping it
+	// would change game state; it is not a pure poll.
 	// All four: "clr.b $100A30.l; pc: tst.b $100A30.l; beq.s pc", polling a
 	// flag the VBlank handler sets (0x142C is the hottest). Found with
 	// MVS64_IDLEPROBE and checked in the disassembly.
