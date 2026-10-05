@@ -59,6 +59,19 @@ static int audio_enabled = 0;
 // rspq lost-wakeup watchdog kicks (see plat_audio_pump).
 static uint32_t rspwp_wedge_kicks;
 #endif
+// rspq lowpri command-buffer size, read by libdragon's rspq_init through the
+// vendored patch (patches/libdragon-rspq-lowpri-size.patch); an unpatched
+// toolchain ignores both and keeps upstream's 0x200 words. A busy frame
+// issues ~10 KB of video commands while the RSP is often busy with a highpri
+// audio burst, so with 2 x 2 KB the CPU blocks in rspq_next_buffer instead of
+// returning to 68k emulation. The allocation is fixed at the max so A/B
+// twins (MVS64_RSPQ_LOWPRI_WORDS) keep an identical heap; both pinned to
+// .data so the twins' binaries differ only in the initializer.
+#ifndef MVS64_RSPQ_LOWPRI_WORDS
+#define MVS64_RSPQ_LOWPRI_WORDS 0x1000
+#endif
+int __rspq_lowpri_buffer_words __attribute__((section(".data"))) = MVS64_RSPQ_LOWPRI_WORDS;
+int __rspq_lowpri_alloc_words  __attribute__((section(".data"))) = 0x1000;
 // Consecutive pump passes that observed ISR silence-padding (the overload
 // governor input, see plat_audio_pump).
 static int underrun_streak;
@@ -126,7 +139,8 @@ void plat_init(int audiofreq, int fps) {
     // NOTE: there seems to be a bug in libdragon display library when ANTIALIAS_OFF
     // is used. Some RDP register is not configured correctly and the display is
     // corrupted on NTSC consoles.
-	display_init(RESOLUTION_320x240, DEPTH_16_BPP, 2, GAMMA_NONE, ANTIALIAS_RESAMPLE);
+	extern int mvs64_display_buffers;   // 3 (see plat_detach_show), or 2
+	display_init(RESOLUTION_320x240, DEPTH_16_BPP, mvs64_display_buffers, GAMMA_NONE, ANTIALIAS_RESAMPLE);
     dfs_init(DFS_DEFAULT_LOCATION);
     rdpq_init();
     // rdpq_debug_start();
@@ -434,8 +448,47 @@ void plat_save_screenshot(const char *fn) {
 uint8_t *g_screen_ptr;
 int g_screen_pitch;
 
+// Display buffering. With 2 buffers, display_get blocks until the buffer on
+// screen is released at the NEXT vblank, so at 35-45 fps the CPU idled ~7.5
+// ms per busy frame on hardware - vsync quantization, not RDP
+// load (RDP busy ~10 ms/frame). A third buffer removes that wait.
+// Two buffers also fenced every frame: display_get could only return after
+// the previous frame's RSP+RDP work was done, which is what made it safe for
+// the next frame to reuse sprite-cache slots, the palette snapshot and
+// PALETTE_RAM_EMU. With 3 buffers that fence is explicit: each frame ends
+// with rdpq_detach_cb (show + count the frame done, under the DP interrupt)
+// and plat_beginframe waits for that count before video_render touches any
+// shared state. The CPU spends ~13 ms in the 68k/sound before it renders,
+// so the previous frame's ~10 ms of RDP work is normally long finished.
+// mvs64_display_buffers is a .data word: the 2-buffer twin is
+// -DMVS64_DISPLAY_BUFFERS=2 (uses the plain rdpq_detach_show path).
+#ifndef MVS64_DISPLAY_BUFFERS
+#define MVS64_DISPLAY_BUFFERS 3
+#endif
+int mvs64_display_buffers __attribute__((section(".data"))) = MVS64_DISPLAY_BUFFERS;
+static surface_t *cur_disp;
+static uint32_t frames_issued;
+static volatile uint32_t frames_done;
+static void frame_done_cb(void *arg) {   // DP interrupt: RDP finished the frame
+	display_show((surface_t *)arg);
+	frames_done++;
+}
+static void plat_detach_show(void) {
+	if (mvs64_display_buffers > 2) {
+		frames_issued++;
+		rdpq_detach_cb(frame_done_cb, cur_disp);
+	} else {
+		rdpq_detach_show();
+	}
+}
+
 void plat_beginframe(void) {
     surface_t *rdp_disp = display_get();
+    // Previous frame fence (see plat_detach_show): its RDP work, and so all
+    // of its RSP commands, must be done before this frame reuses cache slots
+    // and palette buffers. Trivially true in 2-buffer and draining builds.
+    while ((int32_t)(frames_issued - frames_done) > 0) {}
+    cur_disp = rdp_disp;
 
 	g_screen_ptr = rdp_disp->buffer;
 	g_screen_pitch = 320*2;
@@ -445,5 +498,5 @@ void plat_beginframe(void) {
 }
 
 void plat_endframe(void) {
-	rdpq_detach_show();
+	plat_detach_show();
 }
