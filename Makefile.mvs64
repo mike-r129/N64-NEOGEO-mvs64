@@ -9,9 +9,20 @@ BUILD_DIR = build/mvs64
 
 include $(N64_INST)/include/n64.mk
 
-src = emu.c roms.c hw.c video.c platform_n64.c sprite_cache.c lib/rdl.c m64k/m64k.c m64k/tlb.c $(wildcard hle_*.c)
+core_src = emu.c roms.c hw.c video.c platform_n64.c sprite_cache.c lib/rdl.c $(wildcard hle_*.c)
 rsp = rsp_video.S
+ifdef MUSASHI
+# Fallback 68k core: portable Musashi (the PC build's core). Much slower than
+# m64k, but useful to isolate m64k bugs on a new game. No m64k TLB asm;
+# memory goes through the banks[] callbacks in hw.c.
+src = $(core_src) m68kcpu.c m68kops.c m68kdasm.c
+asm =
+else
+# Default: fast m64k MIPS-asm 68k interpreter (0xFF000000 TLB window + hw_n64.S).
+src = $(core_src) m64k/m64k.c m64k/tlb.c
 asm = hw_n64.S m64k/m64k_asm.S
+CFLAGS += -DUSE_M64K
+endif
 obj = $(src:%.c=$(BUILD_DIR)/%.o) $(asm:%.S=$(BUILD_DIR)/%.o) $(rsp:%.S=$(BUILD_DIR)/%.o)
 
 src_makerom = mvsmakerom.c miniz.c
