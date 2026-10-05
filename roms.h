@@ -4,6 +4,14 @@
 extern uint8_t *P_ROM;
 extern unsigned int rom_pc_idle_skip;
 
+// Sound ROMs (consumed by the Z80/YM2610 subsystem, sound_neogeo.c).
+extern uint8_t *M_ROM;            // Z80 program, resident
+extern unsigned int m_rom_size;
+extern unsigned int v_rom_size;   // YM2610 ADPCM source ROM (streamed from cart)
+extern unsigned int vb_rom_size;  // separate ADPCM-B ROM (0 = ADPCM-B shares v.rom)
+void vrom_read(uint32_t offset, uint8_t *buf, int len);
+void vromb_read(uint32_t offset, uint8_t *buf, int len);
+
 void rom_load(const char *dir);
 void rom_load_prom(const char *dir);
 
