@@ -322,9 +322,15 @@ uint32_t emu_render(void *arg) {
 	render_time = TICKS_DISTANCE(t0, TICKS_READ());
 
 	// Top up the audio once per frame, right after the frame's draw
-	// commands were issued. sound_gen_samples() is rate-agnostic and the
-	// AI ring is wall-clock driven, so where in the frame this runs does
-	// not affect audio timing.
+	// commands were issued — not at the end of the main loop. The
+	// whole-pump offload bursts ~12-16ms of RSP work per pump; pumped at
+	// loop end, that burst was still draining when the NEXT frame's render
+	// issued its commands, and the CPU ate it as rspq back-pressure
+	// (measured 60-76% of the frame in busy scenes). Pumped here, the RSP
+	// finishes the (fast) video queue first and chews the audio under the
+	// remaining ~90% of the frame's 68k work, so the next render meets a
+	// drained queue. sound_gen_samples() is rate-agnostic and the AI ring
+	// is wall-clock driven, so this placement does not affect audio timing.
 	plat_audio_pump();
 	#endif
 

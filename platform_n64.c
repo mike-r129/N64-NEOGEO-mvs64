@@ -15,8 +15,37 @@ void plat_log(const char *fmt, ...) {
 
 volatile int N64_FRAME = 0;
 uint32_t RSP_OVL_ID = 0;
+uint32_t RSP_AUDIO_OVL_ID = 0;
+uint32_t RSP_FM_OVL_ID = 0;
 
 DEFINE_RSP_UCODE(rsp_video);
+DEFINE_RSP_UCODE(rsp_audio);
+DEFINE_RSP_UCODE(rsp_fm);
+
+// Boot-time self-test of the audio RSP overlay: round-trip a small buffer
+// through cmd_adpcm_test (DMA in, +1 every byte, DMA out). Proves overlay
+// registration, command dispatch and both DMA directions before the ADPCM
+// offload ever runs. One [RSPAUDIO] line either way.
+static void rsp_audio_selftest(void) {
+    static uint8_t src[64] __attribute__((aligned(16)));
+    static uint8_t dst[64] __attribute__((aligned(16)));
+    for (int i = 0; i < 64; i++) { src[i] = (uint8_t)(i * 3 + 7); dst[i] = 0; }
+    data_cache_hit_writeback_invalidate(src, sizeof(src));
+    data_cache_hit_writeback_invalidate(dst, sizeof(dst));
+    rspq_write(RSP_AUDIO_OVL_ID, 0x0, PhysicalAddr(src), PhysicalAddr(dst),
+               64 - 1 /* DMA_SIZE(64, 1) */);
+    rspq_wait();
+    data_cache_hit_invalidate(dst, sizeof(dst));
+    int bad = -1;
+    for (int i = 0; i < 64; i++) {
+        if (dst[i] != (uint8_t)(src[i] + 1)) { bad = i; break; }
+    }
+    if (bad < 0)
+        debugf("[RSPAUDIO] selftest OK\n");
+    else
+        debugf("[RSPAUDIO] selftest FAIL at %d: got %02x want %02x\n",
+               bad, dst[bad], (uint8_t)(src[bad] + 1));
+}
 
 uint8_t keystate[256];
 
@@ -98,8 +127,11 @@ void plat_init(int audiofreq, int fps) {
     rdpq_init();
     // rdpq_debug_start();
 
-    // Register our custom RSP overlay into the RSP queue engine
+    // Register our custom RSP overlays into the RSP queue engine
     RSP_OVL_ID = rspq_overlay_register(&rsp_video);
+    RSP_AUDIO_OVL_ID = rspq_overlay_register(&rsp_audio);
+    RSP_FM_OVL_ID = rspq_overlay_register(&rsp_fm);
+    rsp_audio_selftest();
 
     audio_init(audiofreq, AI_NUM_BUFFERS);
     // ORDER MATTERS: register the callback BEFORE the priming write. The AI
@@ -145,9 +177,57 @@ static void aring_push(const int16_t *src, int n) {
 
 static int16_t stage[2048 * 2];
 
+
+#ifdef MVS64_RSPWP
+// Cross-pump output deferral (whole-pump offload).
+// sound_gen_samples() now returns with its tail RSP chunks still in flight;
+// publishing `stage` to the ring is deferred to the NEXT pump entry, so the
+// RSP burst deficit drains for free during the inter-pump 68k/draw window
+// instead of being paid as a blocking wait at pump end. The fill policy
+// counts the pending buffer as staged lead (it is published before the ISR
+// could ever need it), and a safety valve publishes immediately whenever
+// less than one AI callback of PUBLISHED lead remains.
+void YM2610_wp_finish(void);
+static int wp_pending_n;       // frames generated into stage, not yet published
+static void wp_publish(void) {
+    extern uint32_t profile_snd;
+    uint32_t t0;
+    if (!wp_pending_n) return;
+    t0 = TICKS_READ();
+    YM2610_wp_finish();        // usually instant: the RSP had the whole window
+    profile_snd += TICKS_DISTANCE(t0, TICKS_READ());
+    aring_push(stage, wp_pending_n);
+    wp_pending_n = 0;
+}
+#endif
+
 void plat_audio_pump(void) {
     if (!audio_enabled) return;
 
+#if defined(MVS64_RSPWP) && defined(MVS64_WP_DEATHTEST)
+    // Revive-cycle gate rig, thrash edition (2026-08-30 permanent-loss
+    // postmortem): 8 forced dead-latches ~10s apart starting at pass 3600
+    // (~60s at speed), i.e. every kill lands <30s after the previous
+    // revive. The old bookkeeping exhausted its 6-attempt budget with no
+    // restore path and stayed dead for the session; the fixed bookkeeping
+    // must ride the thrash (parole retries) and, once the kills stop,
+    // return to sustained health (off=0, budget restored) by run end.
+    {
+        extern void YM2610_offload_testkill(void);
+        static int dt_passes;
+        dt_passes++;
+        if (dt_passes >= 3600 && dt_passes <= 7800
+            && (dt_passes - 3600) % 600 == 0)
+            YM2610_offload_testkill();
+    }
+#endif
+
+#ifdef MVS64_RSPWP
+    // Publish the previous pump's deferred buffer first: its chunks have had
+    // the whole inter-pump window to complete, so the blocking finish inside
+    // is normally a no-op poll.
+    wp_publish();
+#endif
     const int buflen = audio_get_buffer_length();
     const int n = buflen <= 2048 ? buflen : 2048;
     // Ring headroom kept staged ahead of the ISR. Two buffers (~80ms @11kHz)
@@ -190,11 +270,21 @@ void plat_audio_pump(void) {
     extern uint32_t profile_snd;
     while (filled < pass_budget) {
         uint32_t lead = aring_wr - aring_rd;
+#ifdef MVS64_RSPWP
+        lead += (uint32_t)wp_pending_n;   // deferred buffer counts as staged
+#endif
         if (lead + (uint32_t)n > TARGET_LEAD) break;   // topped up
+#ifdef MVS64_RSPWP
+        wp_publish();          // free the staging buffer before reusing it
+#endif
         uint32_t snd_t0 = TICKS_READ();
         sound_gen_samples(stage, n);
         profile_snd += TICKS_DISTANCE(snd_t0, TICKS_READ());
+#ifdef MVS64_RSPWP
+        wp_pending_n = n;      // defer the publish to the next pump entry
+#else
         aring_push(stage, n);
+#endif
         filled++;
     }
 
@@ -226,12 +316,31 @@ void plat_audio_pump(void) {
         last_t = now;
         last_rd = rd_now;
         if (filled == 0 && wall_due >= 2 * n) {
+#ifdef MVS64_RSPWP
+            wp_publish();      // free the staging buffer before reusing it
+#endif
             uint32_t snd_t0 = TICKS_READ();
             sound_gen_samples(stage, n);
+#ifdef MVS64_RSPWP
+            // discard buffer: complete in-flight chunks before stage reuse,
+            // but never publish (the platform's AI is broken here anyway)
+            YM2610_wp_finish();
+#endif
             profile_snd += TICKS_DISTANCE(snd_t0, TICKS_READ());
             wall_due -= n;
         }
     }
+
+#ifdef MVS64_RSPWP
+    // Safety valve: with less than one full AI callback of PUBLISHED lead,
+    // the deferred buffer cannot wait for the next pump entry (a slow frame
+    // would starve the ISR into a silence pad). Publish now — this pays the
+    // residual RSP deficit exactly when we're already behind, which is the
+    // old (pre-deferral) behavior.
+    if (wp_pending_n && aring_wr - aring_rd < (uint32_t)n)
+        wp_publish();
+#endif
+
 }
 
 int plat_poll(void) {

@@ -10,7 +10,7 @@ BUILD_DIR = build/mvs64
 include $(N64_INST)/include/n64.mk
 
 core_src = emu.c roms.c hw.c video.c platform_n64.c sprite_cache.c sound_neogeo.c z80_anchor.c z80.c ym2610/ym2610.c lib/rdl.c $(wildcard hle_*.c)
-rsp = rsp_video.S
+rsp = rsp_video.S rsp_audio.S rsp_fm.S
 ifdef MUSASHI
 # Fallback 68k core: portable Musashi (the PC build's core). Much slower than
 # m64k, but useful to isolate m64k bugs on a new game. No m64k TLB asm;
@@ -34,6 +34,23 @@ CFLAGS += $(EXTRA_DEFINES)
 # take effect like C ones.
 ASFLAGS += $(EXTRA_DEFINES)
 N64_ASFLAGS += $(EXTRA_DEFINES)
+
+# RSP audio offload, default ON. The YM2610 FM and ADPCM-A/B synthesis runs
+# on the RSP (rsp_fm.S, rsp_audio.S) as a "whole pump": per-chunk commands
+# with the synthesis state resident on the RSP, and the output collected one
+# pump later, so the CPU never waits per chunk. Bit-exact against the C core
+# (dual-compute gate: EXTRA_DEFINES=-DMVS64_RSPWP_VERIFY, [RSPWP] counters).
+# Measured in ares on samsho2: in-game fps roughly doubled versus the CPU
+# path.
+# make ... ADPCM_CPU=1 WP_OFF=1 forces the C synthesis path (debug/fallback).
+ifndef ADPCM_CPU
+CFLAGS += -DMVS64_RSPADPCM
+else ifndef WP_OFF
+$(error ADPCM_CPU=1 needs WP_OFF=1: the whole-pump offload keeps the ADPCM state on the RSP)
+endif
+ifndef WP_OFF
+CFLAGS += -DMVS64_RSPFM -DMVS64_RSPWP
+endif
 
 # NOTE: the audio TUs (ym2610.c/z80.c/sound_neogeo.c) stay at -O2, measured
 # both ways on N64: -O3 made in-game sound time ~40% worse (the inline/unroll
