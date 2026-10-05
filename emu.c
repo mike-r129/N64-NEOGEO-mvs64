@@ -156,7 +156,13 @@ static void wav_close(void) {
 static int16_t audio_frame[(AUDIO_FREQ / 5 + 16) * 2];
 #endif
 #ifdef USE_M64K
-m64k_t m64k;
+extern m64k_t m64k;   // allocated in m64k_asm.S, next to the dispatch tables
+#endif
+#ifdef MVS64_LAYOUT_PAD
+// Layout-sensitivity rig: shifts .rodata and everything linked after it
+// (.data, .sdata, .sbss) by MVS64_LAYOUT_PAD bytes, to check that a speed
+// result does not depend on where the data happens to land in the dcache.
+__attribute__((used)) const char mvs64_layout_pad[MVS64_LAYOUT_PAD] = {1};
 #endif
 static uint64_t g_clock, g_clock_framebegin;
 static uint64_t m68k_clock;
@@ -435,6 +441,9 @@ int main(int argc, char *argv[]) {
 	#endif
 	m68k_clock = 0;
 
+#ifdef MVS64_LAYOUT_PAD
+	__asm__ volatile("" :: "r"(mvs64_layout_pad));   // keep it past --gc-sections
+#endif
 	emu_add_event(LINE_CLOCK*24,  emu_render, NULL);
 	emu_add_event(LINE_CLOCK*248, emu_vblank_start, NULL);
 

@@ -33,6 +33,28 @@
 .endm
 
      .section .sdata
+#ifndef M64K_SDATA_SETOFS
+#define M64K_SDATA_SETOFS 0x8C0
+#endif
+# Pin this object's .sdata (context + dispatch tables, per-instruction hot)
+# to fixed dcache sets: 8KB-aligned, then offset to set 140. Otherwise it
+# moves with every .data change before it (e.g. instrumented vs release
+# builds put it on different sets). Set 140..194 overlaps only the tail of
+# the Z80 work RAM in z80_hot, which z80_anchor.c pins at 0x1CF0; this
+# pairing measured fast. Costs < 10KB of .sdata padding.
+    .balign 8192
+    .space M64K_SDATA_SETOFS
+# The CPU context (m64k_t; emu.c/testsuite.c only declare it). It is read
+# and written on every dispatched instruction, like the dispatch tables in
+# this object's .sdata (optable, ea_table, rmw_table, opcctable, ...). As a
+# C .bss global it sat at a fixed address while .sdata moves with every
+# .rodata/.data edit, and whenever the two landed on the same dcache sets
+# the 68k ran ~40% slower (measured in ares: 7.9 -> 11.1 ms/frame from
+# an unrelated RSP ucode change). Here, all of it is one contiguous block
+# well under 8KB, so it can never collide with itself.
+    .globl m64k
+    .balign 16
+m64k:         .space M64K_CTX_SIZE
 pc_diff:      .long 0
 
 optable:

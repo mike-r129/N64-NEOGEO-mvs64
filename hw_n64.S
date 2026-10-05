@@ -772,3 +772,12 @@ asm_pbrom_bankno_w:
 
 1:	li k0, 1
 	jr ra
+
+
+# Layout pin. m64k_asm.o links right after this object, so the size of this
+# .text decides which icache sets the whole 68k interpreter lands on (it
+# starts at 0x80000e00 today). Hold it fixed: growing past the mark is an
+# assembler error, and shrinking pads with zeros. Moving it on purpose is a
+# re-baseline: bump the size, then re-measure the 68k and sound times.
+#define HW_N64_TEXT_SIZE 0x980
+	.org HW_N64_TEXT_SIZE
