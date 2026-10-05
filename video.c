@@ -327,6 +327,11 @@ void video_render(void) {
 	render_end();
 }
 
+// Set on every palette write / bank switch; consumed by the N64 render_begin
+// to skip the per-frame 8KB writeback + RSP color conversion when the palette
+// is unchanged. Starts dirty so the first frame always converts.
+uint8_t mvs64_palette_dirty = 1;
+
 void video_palette_w(uint32_t address, uint32_t val, int sz) {
 	if (sz == 4) {
 		video_palette_w(address+0, val >> 16, 2);
@@ -339,6 +344,7 @@ void video_palette_w(uint32_t address, uint32_t val, int sz) {
 	address /= 2;
 	address += PALETTE_RAM_BANK;
 	PALETTE_RAM[address] = val;
+	mvs64_palette_dirty = 1;
 }
 
 uint32_t video_palette_r(uint32_t address, int sz) {
