@@ -7,7 +7,8 @@
 // frames >= MVS64_PCPROF (the define's value; scripted input is frame-keyed,
 // so this selects the same game content in every build).
 // Every PCPROF_WINDOW frames the non-zero lines are dumped as
-// "[PCP] <hexline>:<count> ..." for offline symbolization (via nm).
+// "[PCP] <hexline>:<count> ..." for offline symbolization
+// (tools/analyze-pcprof.py, via nm).
 //
 // Perturbation: one short ISR per sample (~4kHz) — a few % of wall and some
 // icache pollution. Use the shares, not the fps.

@@ -157,7 +157,8 @@ void emu_diag_frame(void) {
 	#ifdef MVS64_OPHIST
 	// Exact per-opcode execution histogram (bumped in m64k_asm.S's
 	// dispatch). Every 300 frames: dump every opcode above ~0.05% of
-	// the interval's executed instructions, then reset.
+	// the interval's executed instructions, then reset. Offline
+	// analysis: tools/analyze-ophist.py.
 	if ((g_frame % 300) == 299) {
 		uint64_t total = 0;
 		for (int i = 0; i < 65536; i++) total += m64k_ophist_tab[i];

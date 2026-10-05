@@ -160,7 +160,7 @@ uint32_t read_hwio(uint32_t addr, int sz)  {
 	// Divergence instrument: log MMIO reads (addr, value, frame). Two
 	// builds' [IO] streams diff at the exact access that misreads a
 	// cycle-derived register (raster/timer), which a TRCRC mismatch alone
-	// cannot localize.
+	// cannot localize (tools/iodiff.sh).
 	{
 		// Volume filter: only registers whose VALUE depends on the
 		// mid-instruction clock or cross-chip timing can be the FIRST
