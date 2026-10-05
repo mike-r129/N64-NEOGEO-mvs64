@@ -2547,8 +2547,17 @@ jmp_exec:
     subu t0, eaptr32, m_pc             # save new pc_diff
     sw t0, pc_diff
     check_addr_error eaptr32, pc_address_error
-    beq m_pc, 0xFF001FE2, idle_skip
-    beq m_pc, 0xFFC18714, idle_skip
+    # The constants MUST be materialized with lui (sign-extending) so their
+    # 64-bit register value matches the map_m68k result: mmap_mask is loaded
+    # with lui, so m_pc is the SIGN-extended 0xFFFFFFFF_FFxxxxxx. Writing
+    # "beq m_pc, 0xFF001FE2" makes GAS emit a ZERO-extended li+dsll+ori
+    # (0x00000000_FF001FE2), and the 64-bit beq can then never be equal.
+    lui t0, 0xFF00
+    ori t1, t0, 0x1FE2
+    beq m_pc, t1, idle_skip           # mslug
+    lui t1, 0xFFC1
+    ori t1, 0x8714
+    beq m_pc, t1, idle_skip           # Universe BIOS vblank wait
     j main_loop
 idle_skip:
     li m_cycles, 0
