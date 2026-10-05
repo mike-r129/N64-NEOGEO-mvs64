@@ -156,7 +156,29 @@ static void wav_close(void) {
 static int16_t audio_frame[(AUDIO_FREQ / 5 + 16) * 2];
 #endif
 #ifdef USE_M64K
-m64k_t m64k;
+extern m64k_t m64k;   // allocated in m64k_asm.S, next to the dispatch tables
+
+// Idle skip (m64k_set_idle_pcs): the game's own wait loops from game.ini
+// (mvsmakerom's game DB), plus the Universe BIOS 4.0 vblank wait when the
+// loaded BIOS has it at 0xC18714: "tst.b $10FE8C.l; bne.s *", a pure poll
+// of a flag its VBlank handler clears.
+static void setup_idle_skip(void) {
+	static const uint8_t unibios_wait[8] = { 0x4A,0x39, 0x00,0x10, 0xFE,0x8C, 0x66,0xF8 };
+	uint32_t pcs[ROM_IDLE_MAX + 1];
+	int n = 0;
+	if (!memcmp(BIOS + 0x18714, unibios_wait, sizeof(unibios_wait)))
+		pcs[n++] = 0xC18714;
+	for (int i = 0; i < rom_idle_npcs; i++)
+		pcs[n++] = rom_idle_pcs[i];
+	n = m64k_set_idle_pcs(pcs, n);
+	debugf("[EMU] idle skip: %d loop(s) registered\n", n);
+}
+#endif
+#ifdef MVS64_LAYOUT_PAD
+// Layout-sensitivity rig: shifts .rodata and everything linked after it
+// (.data, .sdata, .sbss) by MVS64_LAYOUT_PAD bytes, to check that a speed
+// result does not depend on where the data happens to land in the dcache.
+__attribute__((used)) const char mvs64_layout_pad[MVS64_LAYOUT_PAD] = {1};
 #endif
 static uint64_t g_clock, g_clock_framebegin;
 static uint64_t m68k_clock;
@@ -429,12 +451,16 @@ int main(int argc, char *argv[]) {
 
 	#ifdef USE_M64K
 	m64k_pulse_reset(&m64k);
+	setup_idle_skip();
 	#else
 	m68k_set_cpu_type(M68K_CPU_TYPE_68000);
 	m68k_pulse_reset();
 	#endif
 	m68k_clock = 0;
 
+#ifdef MVS64_LAYOUT_PAD
+	__asm__ volatile("" :: "r"(mvs64_layout_pad));   // keep it past --gc-sections
+#endif
 	emu_add_event(LINE_CLOCK*24,  emu_render, NULL);
 	emu_add_event(LINE_CLOCK*248, emu_vblank_start, NULL);
 
@@ -515,6 +541,20 @@ int main(int argc, char *argv[]) {
 			#else
 			(uint32_t)m68k_get_reg(NULL, M68K_REG_PC));
 			#endif
+		#if defined(MVS64_IDLEPROBE) && defined(USE_M64K)
+		{
+			// Idle-loop discovery (EXTRA_DEFINES=-DMVS64_IDLEPROBE): a branch
+			// target the interpreter hit 4000 times in a row is a wait loop
+			// candidate for the game's idle_skip list (check it disassembles
+			// to a pure poll before adding it).
+			extern uint32_t idle_probe_found;
+			if (idle_probe_found) {
+				debugf("[IDLEPROBE] long spin at 68k pc=%06lx\n",
+					(unsigned long)(idle_probe_found & 0xFFFFFF));
+				idle_probe_found = 0;
+			}
+		}
+		#endif
 		#endif
 
 		#ifdef N64

@@ -24,7 +24,12 @@
 #define M64K_OFF_IPL          (M64K_OFF_TS_CUR     + 1 * 4)
 #define M64K_OFF_NMI_PENDING  (M64K_OFF_IPL        + 1 * 1)
 #define M64K_OFF_CHECK_INTERRUPTS  (M64K_OFF_NMI_PENDING + 1 * 1)
-
+#define M64K_OFF_SLICE_BREAK       (M64K_OFF_CHECK_INTERRUPTS + 1 * 1)
+#define M64K_OFF_FORCED_REMAINING  (M64K_OFF_SLICE_BREAK + 1 * 1)
+// sizeof(m64k_t): the context is allocated in m64k_asm.S (see there).
+#define M64K_CTX_SIZE         144
+// Capacity of the jmp_exec idle-skip table (m64k_set_idle_pcs).
+#define M64K_IDLE_MAX         8
 
 #ifndef __ASSEMBLER__
 #include "m64k.h"
@@ -35,6 +40,9 @@ _Static_assert(offsetof(m64k_t, sr)     == M64K_OFF_SR, "dregs offset is wrong")
 _Static_assert(offsetof(m64k_t, cycles) == M64K_OFF_CYCLES, "cycles offset is wrong");
 _Static_assert(offsetof(m64k_t, ts_start) == M64K_OFF_TS_START, "ts_start offset is wrong");
 _Static_assert(offsetof(m64k_t, check_interrupts) == M64K_OFF_CHECK_INTERRUPTS, "check_interrupts offset is wrong");
+_Static_assert(offsetof(m64k_t, slice_break) == M64K_OFF_SLICE_BREAK, "slice_break offset is wrong");
+_Static_assert(offsetof(m64k_t, forced_remaining) == M64K_OFF_FORCED_REMAINING, "forced_remaining offset is wrong");
+_Static_assert(sizeof(m64k_t) == M64K_CTX_SIZE, "M64K_CTX_SIZE is wrong");
 #endif
 
 #endif

@@ -289,6 +289,12 @@ void hw_init(void) {
 	if (PB_ROM) {
 		m64k_map_memory(&m64k, 0x200000, 0x100000, PB_ROM+0x000000, false);
 	}
+	#ifdef M64K_BLOCKOPS
+	// The fused DBF long copy may read the PB-ROM window only when it is
+	// linearly mapped (m64k_asm.S, mvs64_blockop_pbrom_ok).
+	extern uint32_t mvs64_blockop_pbrom_ok;
+	mvs64_blockop_pbrom_ok = PB_ROM != NULL;
+	#endif
 	m64k_map_memory(&m64k, 0x800000, 0x010000, MEMCARD_RAM, true);
 	m64k_map_memory(&m64k, 0xC00000, 0x020000, BIOS,       false);
 	m64k_map_memory(&m64k, 0xD00000, 0x010000, BACKUP_RAM, true);

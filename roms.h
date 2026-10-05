@@ -8,6 +8,12 @@
 extern uint8_t *P_ROM;
 extern unsigned int rom_pc_idle_skip;
 
+// Idle-loop heads for the m64k idle skip (game.ini "idle_skip=pc,pc,..."):
+// targets of the backward branch of side-effect-free wait loops.
+#define ROM_IDLE_MAX 7
+extern uint32_t rom_idle_pcs[ROM_IDLE_MAX];
+extern int rom_idle_npcs;
+
 // Sound ROMs (consumed by the Z80/YM2610 subsystem, sound_neogeo.c).
 extern uint8_t *M_ROM;            // Z80 program, resident
 extern unsigned int m_rom_size;

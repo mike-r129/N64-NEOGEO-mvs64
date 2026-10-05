@@ -22,6 +22,32 @@ else
 src = $(core_src) m64k/m64k.c m64k/tlb.c
 asm = hw_n64.S m64k/m64k_asm.S
 CFLAGS += -DUSE_M64K
+# DBF block-op fast path: fused copy/fill loops. The VRAM-port helper lives
+# in hw_n64.S, so only game builds enable it (the standalone testsuite has no
+# hw_n64.S). The fused path must be bit- and cycle-exact against the
+# interpreter; make ... BLOCKOPS_OFF=1 builds it out for A/B gating.
+ifndef BLOCKOPS_OFF
+CFLAGS += -DM64K_BLOCKOPS
+ASFLAGS += -DM64K_BLOCKOPS
+N64_ASFLAGS += -DM64K_BLOCKOPS
+endif
+# Inline stores to the LSPC VRAM ports (0x3C0000/2/4) in the hot MOVE.w and
+# MOVE.l fast paths, so those writes skip the TLB trap. Game builds only
+# (references lspc.c's registers and VIDEO_RAM). make ... PORTSTORE_OFF=1
+# builds it out.
+ifndef PORTSTORE_OFF
+ASFLAGS += -DM64K_PORTSTORE
+N64_ASFLAGS += -DM64K_PORTSTORE
+endif
+# Inline fast paths for the most frequent opcode forms (Bcc/DBcc, RTS,
+# common MOVE.b/.w/.l forms, ADDQ/SUBQ/CMPI/ADD/TST on simple operands).
+# Covered by the m64k testsuite, which builds with the same define.
+# make ... FP_OFF=1 builds without them, for A/B comparisons.
+ifndef FP_OFF
+CFLAGS += -DM64K_FASTPATHS
+ASFLAGS += -DM64K_FASTPATHS
+N64_ASFLAGS += -DM64K_FASTPATHS
+endif
 endif
 obj = $(src:%.c=$(BUILD_DIR)/%.o) $(asm:%.S=$(BUILD_DIR)/%.o) $(rsp:%.S=$(BUILD_DIR)/%.o)
 

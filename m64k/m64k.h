@@ -21,6 +21,14 @@ typedef struct {
     uint8_t ipl;
     uint8_t nmi_pending;
     uint8_t check_interrupts;
+    // Set (from C, within an MMIO handler) to request that the current
+    // timeslice ends at the next MMIO boundary. Consumed by the TLB handler.
+    uint8_t slice_break;
+    // Cycles clamped out of the live cycle counter by a forced slice exit
+    // (slice_break or an SR reload that unmasked a pending IRQ). m64k_run
+    // adds this back to the value returned by the asm core so the guest
+    // clock stays exact.
+    int32_t forced_remaining;
 
     uint8_t virq;
     int (*hook_irqack)(void *ctx, int level);
@@ -33,6 +41,7 @@ typedef uint32_t m64k_mapping_t;
 void m64k_init(m64k_t *m64k);
 void m64k_pulse_reset(m64k_t *m64k);
 int64_t m64k_run(m64k_t *m64k, int64_t until);
+
 
 /**
  * @brief Map a linear buffer of memory into the m68k memory map.
@@ -204,6 +213,21 @@ void m64k_set_mmio_handlers(m64k_t *m64k,
  * before reaching the requested target.
  */
 void m64k_run_stop(m64k_t *m64k);
+
+/**
+ * @brief Register idle-loop heads for the idle skip.
+ *
+ * Each PC is the target of the backward branch of a side-effect-free wait
+ * loop (typically "loop: tst.b flag; beq loop", waiting for a flag set by an
+ * interrupt). When the interpreter branches back to one of them, it ends the
+ * current timeslice, fast-forwarding the wait to the next scheduled event.
+ * Only register loops that do nothing but poll: anything else changes
+ * behavior. Replaces the previous list; at most M64K_IDLE_MAX (8) entries
+ * are used, and zero entries are ignored.
+ *
+ * @return the number of PCs registered
+ */
+int m64k_set_idle_pcs(const uint32_t *pcs, int n);
 
 /**
  * @brief Get the current PC.

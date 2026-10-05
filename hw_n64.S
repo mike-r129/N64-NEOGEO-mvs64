@@ -1,5 +1,6 @@
 
 #include "regs.S"
+#include "m64k/m64k_internal.h"
 
 #define C0_BADVADDR	       $8
 #define C0_CAUSE_TLBSTORE   3
@@ -7,20 +8,13 @@
 #define SAFE_MODE           1
 
 
+# Trap-time accounting for the [PROFILE] io% column costs ~10 instructions
+# (two COUNT reads + two RMW stores) on every MMIO trap, ~1k traps per busy
+# frame, so the trap path no longer does it: io% reads 0.
 .macro PROFILE_START
-	mfc0 k0, C0_COUNT
-	lw k1, profile_hw_io
-	subu k1, k0
-	la k0, profile_hw_io
-	sw k1, 0(k0)
 .endm
 
 .macro PROFILE_END
-	mfc0 k0, C0_COUNT
-	lw k1, profile_hw_io
-	addu k1, k0
-	la k0, profile_hw_io
-	sw k1, 0(k0)
 .endm
 
 	.section .sdata
@@ -223,6 +217,29 @@ tlbcallhandler_standard:
 #undef k0
 #undef k1
 
+	# m64k slice bookkeeping: keep ctx->ts_cur fresh so mid-slice
+	# emu_clock() reads (from the C MMIO handlers we are about to call)
+	# stay exact, now that the interpreter no longer stores it
+	# per-instruction. Only valid when the fault came from inside the
+	# interpreter's text (then saved a1 == live m_cycles): nested faults
+	# from C handlers and faults from outside m64k are skipped, as is a
+	# slice that was already clamped (forced_remaining!=0 -> ts_cur is
+	# frozen at the clamp value).
+	lw t0, __m64k_live
+	beqz t0, 8f
+	 ld t1, 22*8(sp)                  # faulting EPC (BD-corrected)
+	la t2, _m64k_asmrun
+	sltu t3, t1, t2
+	bnez t3, 8f                       # EPC below interpreter text
+	 nop
+	la t2, __m64k_asm_end
+	sltu t3, t1, t2
+	beqz t3, 8f                       # EPC above interpreter text
+	 lw t2, M64K_OFF_FORCED_REMAINING(t0)
+	bnez t2, 8f
+	 ld t3, 8*8(sp)                   # saved a1 = live m_cycles
+	sw t3, M64K_OFF_TS_CUR(t0)
+8:
 	# Decode faulting instruction at EPC. We get the memory address in C0_BADVADDR,
 	# but we need to decode the RS register because it contains the actual value
 	# being read/written. Also, the opcode itself encodes the access width (eg:
@@ -367,6 +384,36 @@ tlb_writehwio_palette:
 	##########################################
 
 tlb_restore:
+	# If a C handler requested a slice break (m64k_set_irq / m64k_run_stop),
+	# bank the live cycle counter into forced_remaining and clamp the saved
+	# a1 (m_cycles) to 0: the faulting instruction completes and the
+	# interpreter exits at the next instruction boundary. m64k_run adds
+	# forced_remaining back, so guest-clock accounting stays exact.
+	# Gated on the faulting EPC being inside the interpreter text: in a
+	# nested fault (C handler touching 0xFF.. space) the saved a1 is NOT
+	# m_cycles, so the break request is left set and consumed by the
+	# outermost (interpreter-level) restore instead.
+	lw t0, __m64k_live
+	beqz t0, 9f
+	 ld t1, 22*8(sp)                  # faulting EPC (BD-corrected)
+	la t2, _m64k_asmrun
+	sltu t3, t1, t2
+	bnez t3, 9f                       # EPC below interpreter text
+	 nop
+	la t2, __m64k_asm_end
+	sltu t3, t1, t2
+	beqz t3, 9f                       # EPC above interpreter text
+	 lbu t1, M64K_OFF_SLICE_BREAK(t0)
+	beqz t1, 9f
+	 nop
+	sb zero, M64K_OFF_SLICE_BREAK(t0)
+	ld t2, 8*8(sp)                    # saved a1 = live m_cycles
+	lw t3, M64K_OFF_FORCED_REMAINING(t0)
+	addu t3, t2
+	sw t3, M64K_OFF_FORCED_REMAINING(t0)
+	sw t2, M64K_OFF_TS_CUR(t0)
+	sd zero, 8*8(sp)                  # clamp m_cycles -> exit after this insn
+9:
 	# Restore the stack frame
 	ld t0, 23*8(sp)
 	ld t1, 22*8(sp)
@@ -593,12 +640,15 @@ mvs64_asm_io_read16:
 	j tlbcallhandler_standard
 
 mvs64_asm_io_write:
-	beq k1, 0x2FFFF0, asm_pbrom_bankno_w
-	beq k1, 0x300001, asm_watchdog_w
-	beq k1, 0x3C0000, asm_lspc_vram_addr_w
+	# Ordered by measured in-game frequency: the LSPC VRAM data port takes
+	# hundreds of hits per frame (SCB uploads), then the address port,
+	# palette, modulo; watchdog/pbrom-bank are per-frame singletons.
 	beq k1, 0x3C0002, asm_lspc_vram_data_w
-	beq k1, 0x3C0004, asm_lspc_vram_modulo_w
+	beq k1, 0x3C0000, asm_lspc_vram_addr_w
 	bge k1, 0x400000, asm_video_palette_w
+	beq k1, 0x3C0004, asm_lspc_vram_modulo_w
+	beq k1, 0x300001, asm_watchdog_w
+	beq k1, 0x2FFFF0, asm_pbrom_bankno_w
 	j tlbcallhandler_standard
 
 asm_watchdog_w:
@@ -685,6 +735,54 @@ asm_pbrom_r8:
 #define C0_INDEX	$0
 #define C0_ENTRYLO0 $2
 
+# Block-op helper for the m64k DBF fast path (M64K_BLOCKOPS): copy a run of
+# words from an already-mapped N64 pointer to the LSPC VRAM data port
+# (0x3C0002), replicating asm_lspc_vram_data_w semantics (write at
+# bank+addr*2, addr = (addr+modulo) & mask) without taking one TLB
+# exception per word. modulo/mask/bank cannot change mid-run (only port
+# writes change them, and none happen here), so they are hoisted.
+# In:  t1 = source pointer (N64-mapped, even 68k address)
+#      t2 = word count (>= 1)
+# Clobbers: t0-t4, t7, t8, t9. Preserves all m64k fixed regs (incl. t5=m_pc).
+	.global mvs64_blockop_vram_copy_w
+mvs64_blockop_vram_copy_w:
+	lhu t0, %gprel(reg_vram_addr)(gp)
+	lw t3, %gprel(reg_vram_bank)(gp)
+	lhu t8, %gprel(reg_vram_mod)(gp)
+	lhu t9, %gprel(reg_vram_mask)(gp)
+1:	lhu t4, 0(t1)
+	addiu t1, 2
+	sll t7, t0, 1
+	addu t7, t3
+	sh t4, 0(t7)
+	addu t0, t8                       # addr += modulo
+	and t0, t9                        # addr &= mask
+	addiu t2, -1
+	bnez t2, 1b
+	sh t0, %gprel(reg_vram_addr)(gp)
+	jr ra
+
+# Same, but writing one constant value: the "move.w Dn,(An) / dbf" port
+# fill (opcode & 0xF1F8 == 0x3080) that games use to clear VRAM ranges.
+# In:  t1 = 16-bit fill value
+#      t2 = word count (>= 1)
+# Clobbers: t0, t3, t7, t8, t9. Preserves all m64k fixed regs.
+	.global mvs64_blockop_vram_fill_w
+mvs64_blockop_vram_fill_w:
+	lhu t0, %gprel(reg_vram_addr)(gp)
+	lw t3, %gprel(reg_vram_bank)(gp)
+	lhu t8, %gprel(reg_vram_mod)(gp)
+	lhu t9, %gprel(reg_vram_mask)(gp)
+1:	sll t7, t0, 1
+	addu t7, t3
+	sh t1, 0(t7)
+	addu t0, t8                       # addr += modulo
+	and t0, t9                        # addr &= mask
+	addiu t2, -1
+	bnez t2, 1b
+	sh t0, %gprel(reg_vram_addr)(gp)
+	jr ra
+
 asm_pbrom_bankno_w:
 	# Check if the new bank is different from the current one
 	sll t6, 20
@@ -722,3 +820,12 @@ asm_pbrom_bankno_w:
 
 1:	li k0, 1
 	jr ra
+
+
+# Layout pin. m64k_asm.o links right after this object, so the size of this
+# .text decides which icache sets the whole 68k interpreter lands on (it
+# starts at 0x80000e00 today). Hold it fixed: growing past the mark is an
+# assembler error, and shrinking pads with zeros. Moving it on purpose is a
+# re-baseline: bump the size, then re-measure the 68k and sound times.
+#define HW_N64_TEXT_SIZE 0x980
+	.org HW_N64_TEXT_SIZE
