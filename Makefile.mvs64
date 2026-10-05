@@ -33,6 +33,9 @@ CFLAGS += $(EXTRA_DEFINES)
 # Propagate EXTRA_DEFINES to the assembler too, so .S-file feature gates
 # take effect like C ones.
 ASFLAGS += $(EXTRA_DEFINES)
+# ...and to the RSP assembler (rsp_*.S build with RSPASFLAGS), so ucode-side
+# twin knobs (e.g. -DMVS64_ROTA_OFF in rsp_video.S) can be driven the same way.
+RSPASFLAGS += $(EXTRA_DEFINES)
 N64_ASFLAGS += $(EXTRA_DEFINES)
 
 # RSP audio offload, default ON. The YM2610 FM and ADPCM-A/B synthesis runs

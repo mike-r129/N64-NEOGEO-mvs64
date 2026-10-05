@@ -48,18 +48,46 @@ static uint16_t color_convert(uint16_t val) {
 
 static uint16_t PALETTE_RAM_EMU[4*1024];
 
+
+// Draw-path timers and counters; all compile to nothing in a release build.
+//   DPERF_T0(t) / DPERF_ADD(acc, t): start a TICKS timer, add its elapsed
+//   ticks to acc (DRAW_PERF_COARSE: profiling builds).
+//   DPERF_INC(c): per-record counter (DRAW_PERF: PERFCOUNT builds only).
+//   dperf_tile(w0, w1): count a drawn tile, split by RDP path (G/H).
+#define DPERF_T0(t)        ((void)0)
+#define DPERF_ADD(acc, t)  ((void)0)
+#define dperf_tile(w0, w1) ((void)0)
+#define DPERF_INC(c)       ((void)0)
+
+// --- sprite walk -------------------------------------------------------------
+// The SCB walk turns each visible tile into a record and draws it on the
+// spot. A record is two words, exactly what the draw needs:
+//   w0 = tnum[0..19] | palnum[20..27] | flipx[28] | flipy[29]
+//   w1 = sx[0..11] | ssy[12..23] | (sw-1)[24..27] | (ssh-1)[28..31]
+// Positions keep only the low 12 bits, which is lossless: both draw paths
+// reduce positions mod 512 (PC) or to a 12-bit signed field (RSP), and
+// sx/ssy never carry information above that. On N64, w0/w1 go to the RSP
+// as the 2-word cmd_sprite_draw2 almost unchanged.
+
+// ~4x the busiest measured scene (~1000 drawn tiles in a fight). Excess
+// tiles are walked correctly but dropped (logged).
+#define SPRWALK_MAX_RECS  4096
+static int sprwalk_overflow;   // records dropped this frame (diagnostic)
+
 #ifdef N64
-	#if 1
-	#include "video_n64.c"
-	#else
-	#include "video_cpu.c"
-	#endif
+#include "video_n64.c"
 #else
 #include "video_cpu.c"
 #endif
 
+// Fix layer. The per-cell empty test is inlined (srom_tile_empty_fast) with a
+// 1-entry memo of the last blank tile code: the map repeats the same blank
+// codes, and ~950 of ~1120 cells are blank in fights. The memo is per call:
+// tile numbers only change meaning on srom_set_bank, which the 68k does
+// between renders.
 static void render_fix(void) {
 	uint16_t *fix = VIDEO_RAM + 0x7000;
+	int last_blank = -1;
 
 	render_begin_fix();
 
@@ -67,8 +95,15 @@ static void render_fix(void) {
 		fix += 2; // skip two lines
 		for (int j=0;j<28;j++) {
 			uint16_t v = *fix++;
-			if (v)
-				draw_sprite_fix(v & 0xFFF, (v >> 12) & 0xF, i*8, j*8);
+			// Skip tiles known to decode to all-transparent pixels: the map
+			// is full of nonzero "blank" codes, so without this we issue
+			// ~1120 draws/frame that can never touch the screen (see
+			// srom_tile_empty).
+			if (!v) continue;
+			int t = v & 0xFFF;
+			if (t == last_blank) continue;
+			if (srom_tile_empty_fast(t)) { last_blank = t; continue; }
+			draw_sprite_fix(t, (v >> 12) & 0xF, i*8, j*8);
 		}
 		fix += 2;
 	}
@@ -77,14 +112,62 @@ static void render_fix(void) {
 }
 
 
-static void render_sprites(void) {
+// Draw one record. Forced inline: as a call (GCC kept it out of line) every
+// drawn tile paid ~35 instructions of spills/reloads and prologue, and
+// re-read the C-ROM context from memory.
+static inline __attribute__((always_inline))
+void sprite_consume_one(const CromResolveCtx *cx, uint32_t w0, uint32_t w1) {
+	uint32_t tnum = w0 & 0xFFFFF;
+#ifdef N64
+	// Fused empty-test + resolve through the C-ROM direct table (roms.c):
+	// one sparse read per record, NULL for an all-transparent tile.
+	DPERF_T0(c0);
+	uint8_t *src = crom_resolve_fast(cx, tnum);
+	DPERF_ADD(perf_dr_cache, c0);
+	if (!src) {
+		DPERF_INC(perf_dr_empty);
+		return;
+	}
+	dperf_tile(w0, w1);
+	DPERF_T0(r0);
+	rsp_sprite_draw2((uint32_t)(src - cx->sprites) >> 7, w0, w1);
+	DPERF_ADD(perf_dr_rspq, r0);
+#else
+	// PC: skip tiles known to decode to all-transparent pixels (learned on
+	// first fetch; index-0 pixels never pass the alpha compare), then draw
+	// on the CPU.
+	(void)cx;
+	if (crom_tile_empty(tnum))
+		return;
+	draw_sprite(tnum, (w0 >> 20) & 0xFF,
+	            w1 & 0xFFF, (w1 >> 12) & 0xFFF,
+	            ((w1 >> 24) & 0xF) + 1, ((w1 >> 28) & 0xF) + 1,
+	            w0 & (1 << 28), w0 & (1 << 29));
+#endif
+}
+
+// Same SCB reads, vshrink math, culls and order as the historical direct-draw
+// loop. Each record is drawn the moment it is produced (no record list: that
+// was a cached write+readback of ~5KB/frame modal, up to 32KB dense, i.e. a
+// streaming sweep through the 8KB dcache).
+// Kept out of line: inlined into video_render (which GCC does once the walk
+// has a single caller) the per-tile loop shares registers with the frame
+// timers there, and the sprite pass measured ~0.2 ms slower in ares.
+static __attribute__((noinline)) void sprite_walk(void) {
 	int sx = 0, sy = 0, sh = 0, sw = 0, vshrink = 0;
 	bool repeat_tiles = false;
+	int nrec = 0;
 
 	uint8_t aa;
 	bool aa_enabled = lspc_get_auto_animation(&aa);
 
-	render_begin_sprites();
+	sprwalk_overflow = 0;
+	// Per-render CDT context, local so the walk keeps it in registers: the
+	// copy's address never escapes the inlined consume path (cx0's does,
+	// into crom_resolve_ctx, which made GCC reload it after every store).
+	CromResolveCtx cx0;
+	crom_resolve_ctx(&cx0);
+	const CromResolveCtx cx = cx0;
 
 	for (int snum=0;snum<381;snum++) {
 		uint16_t zc = VIDEO_RAM[0x8000 + snum];
@@ -107,11 +190,29 @@ static void render_sprites(void) {
 
 		if (sh == 0) continue;
 		if (sx >= 320 && sx+sw <= 512) continue;
+		// Coarse Y-cull: every tile drawn below has
+		// ssy in [sy, sy+sh) and passes the per-tile visibility test
+		// "ssy < 224 || ssy+ssh > 512". If the whole sprite span lies in
+		// the hidden band [224, 512], no tile can pass — skip the tile
+		// walk entirely. Exactly equivalent to the per-tile checks (pure
+		// speedup, pixel-identical by construction); chain bookkeeping
+		// (sx += sw) already happened above.
+		if (sy >= 224 && sy + sh <= 512) continue;
+		DPERF_INC(perf_walk_spr);
 
 		// debugf("[VIDEO] sprite snum:%d xc:%04x yc:%04x zc:%04x pos:%d,%d sh:%d chain:%d repeat:%d tmap:%04x:%04x\n", snum, xc, yc, zc, sx, sy, sh, (yc & 0x40), repeat_tiles, tmap[0], tmap[1]);
 
 		int nt, y, maxy;
 		int halfy = sh < 256 ? sh : 256;
+		// Early-out: when the sprite does not
+		// wrap (sy+sh <= 512), ssy+ssh <= 512 for every tile (ssh is clipped
+		// to sh), so a tile is visible iff ssy < 224. y never decreases in
+		// the top half, and the bottom half starts at y >= 241 (512 minus a
+		// top-half end <= 271) with sy >= -15, i.e. ssy >= 226: once a
+		// top-half tile reaches ssy >= 224 nothing later in this sprite can
+		// be visible. Skips the culled lower tiles of full-height strips
+		// (~437 culled iterations/frame in fights). Same records, same order.
+		const bool nowrap = (sy + sh <= 512);
 
 		// Iterate on the two halves of the vertical sprite. This for loop
 		// is mainly useful to reuse the core drawing loop. The setup
@@ -150,6 +251,7 @@ static void render_sprites(void) {
 
 			// Loop through the vertical sprite, tile by tile
 			while (y < maxy) {
+				DPERF_INC(perf_walk_iter);
 				// Calculate the vertical size of this tile. This is
 				// a pixel-perfect formula using the magic table derived
 				// from the original NeoGeo L0 ROM.
@@ -166,6 +268,7 @@ static void render_sprites(void) {
 
 					// See if this tile is visible, given its Y coordinate and size
 					int ssy = sy + y;
+					if (nowrap && ssy >= 224) goto sprite_done;
 					if (ssy < 224 || (ssy+ssh) > 512) {
 						uint32_t tnum = tmap[nt*2+0];
 						uint32_t tc = tmap[nt*2+1];
@@ -175,32 +278,47 @@ static void render_sprites(void) {
 
 						// debugf("[VIDEO]   %s: nt:%d y:%d ssy:%d ssh:%d tnum:%x\n", half?"bot":"top", nt, y, ssy, ssh, tnum);
 
-						// Auto animation
-						if (aa_enabled) {
-							if (tc & 8)      { tnum &= ~7; tnum |= aa & 7; }
-							else if (tc & 4) { tnum &= ~3; tnum |= aa & 3; }
-						}
+					// Auto animation
+					if (aa_enabled) {
+						if (tc & 8)      { tnum &= ~7; tnum |= aa & 7; }
+						else if (tc & 4) { tnum &= ~3; tnum |= aa & 3; }
+					}
 
-						// Draw the tile
-						draw_sprite(tnum, palnum, sx, ssy, sw, ssh, tc&1, tc&2);
+					// Build the record and draw it.
+					if (nrec < SPRWALK_MAX_RECS) {
+						uint32_t w0 = tnum | (palnum << 20)
+						            | ((tc & 1) << 28) | ((tc & 2) << 28);
+						uint32_t w1 = (sx & 0xFFF) | ((ssy & 0xFFF) << 12)
+						            | ((sw-1) << 24) | ((ssh-1) << 28);
+						sprite_consume_one(&cx, w0, w1);
+						nrec++;
+					} else {
+						sprwalk_overflow++;
 					}
 				}
-
-				y += ssh;
-				nt++; nt &= 31;
-
-				// In non-repeat mode (standard), the top half
-				// finishes when/if we reach tile #16 (or before, if
-				// the vertical sprite size is reached).
-				if (!repeat_tiles && nt == 16) break;  // FIXME: draw overfill when not repeating
 			}
+
+			y += ssh;
+			nt++; nt &= 31;
+
+			// In non-repeat mode (standard), the top half
+			// finishes when/if we reach tile #16 (or before, if
+			// the vertical sprite size is reached).
+			if (!repeat_tiles && nt == 16) break;  // FIXME: draw overfill when not repeating
 		}
 	}
-
-	render_end_sprites();
+	sprite_done: ;
 }
 
+	if (sprwalk_overflow)
+		debugf("[VIDEO] sprite walk overflow: %d records dropped\n", sprwalk_overflow);
+}
 
+static void render_sprites(void) {
+	render_begin_sprites();
+	sprite_walk();
+	render_end_sprites();
+}
 
 void video_render(void) {
 	render_begin();
