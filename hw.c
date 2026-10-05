@@ -5,7 +5,7 @@
 #include "roms.h"
 #include "video.h"
 #include "emu.h"
-#ifdef N64
+#ifdef USE_M64K
 #include "m64k/m64k.h"
 #else
 #include "m68k.h"
@@ -72,7 +72,7 @@ void write_pbrom(uint32_t addr, uint32_t val, int sz) {
 		// If the PBROM area linearly mapped, update the mapping.
 		if (banks[0x2].mem) {
 			banks[0x2].mem = pbrom_linear() + val*0x100000;
-			#ifdef N64
+			#ifdef USE_M64K
 			extern m64k_t m64k;
 			m64k_map_memory(&m64k, 0x200000, 0x100000, banks[0x2].mem, false);
 			// m64k_map_memory_change(&m64k, pbrom_memid, banks[0x2].mem, false);
@@ -182,7 +182,7 @@ void write_hwio(uint32_t addr, uint32_t val, int sz)  {
 }
 
 
-#ifndef N64
+#ifndef USE_M64K
 
 unsigned int  m68k_read_memory_8(unsigned int address) {
 	Bank *b = &banks[(address>>20)&0xF];
@@ -276,7 +276,7 @@ void hw_init(void) {
 	banks[0xC] = (Bank){ BIOS,             0x1FFFF,   NULL,            write_unk };
 	banks[0xD] = (Bank){ BACKUP_RAM,       0x0FFFF,   NULL,            write_unk };
 
-	#ifdef N64
+	#ifdef USE_M64K
 	extern m64k_t m64k;
 	disable_interrupts();
 
