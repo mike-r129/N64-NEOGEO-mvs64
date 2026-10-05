@@ -290,7 +290,7 @@ int cpu_irqack(void *ctx, int level)
 uint32_t emu_vblank_start(void* arg) {
 	emu_cpu_irq(1, true);
 	hw_vblank();
-	debugf("[EMU] VBlank - clock:%lld clock_frame:%lld\n", (long long)emu_clock(), (long long)emu_clock_frame());
+	framef("[EMU] VBlank - clock:%lld clock_frame:%lld\n", (long long)emu_clock(), (long long)emu_clock_frame());
 	return FRAME_CLOCK;
 }
 
@@ -330,7 +330,7 @@ uint32_t emu_render(void *arg) {
 		}
 	}
 
-	debugf("[RENDER] render\n");
+	framef("[RENDER] render\n");
 	#ifdef N64
 	uint32_t t0 = TICKS_READ();
 	#endif
@@ -381,7 +381,7 @@ void emu_run_frame(void) {
     	g_clock = m68k_exec(vsync);
 
     // Frame completed
-	debugf("[EMU] Frame completed: %d (vsync: %llu)\n", g_frame, (unsigned long long)vsync);
+	framef("[EMU] Frame completed: %d (vsync: %llu)\n", g_frame, (unsigned long long)vsync);
     g_frame++;
 	g_clock_framebegin += FRAME_CLOCK;
 }
@@ -528,8 +528,9 @@ int main(int argc, char *argv[]) {
 
 		#ifdef N64
 		uint32_t emu_time = TICKS_DISTANCE(t0, TICKS_READ());
+		(void)emu_time;   // only read by framef (compiled out with MVS64_QUIET)
 
-		debugf("[PROFILE] cpu:%.2f%% m68k:%.2f%% snd:%.2f%% io:%.2f%% draw:%.2f%% dma:%.2f%% PC:%06lx\n",
+		framef("[PROFILE] cpu:%.2f%% m68k:%.2f%% snd:%.2f%% io:%.2f%% draw:%.2f%% dma:%.2f%% PC:%06lx\n",
 			(float)emu_time * 100.f / (float)(TICKS_PER_SECOND / 60),
 			(float)profile_m68k * 100.f / (float)(TICKS_PER_SECOND / 60),
 			(float)profile_snd * 100.f / (float)(TICKS_PER_SECOND / 60),

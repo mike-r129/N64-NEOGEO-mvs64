@@ -125,8 +125,18 @@ static void vblank_handler(void) {
 
 void plat_init(int audiofreq, int fps) {
 #ifdef __LIBDRAGON_DEBUG_H
+#ifndef MVS64_NOISVIEWER
+    // -DMVS64_NOISVIEWER skips this: some emulators (BizHawk-Mupen) falsely
+    // pass ISViewer detection but never drain it, and a full ISViewer buffer
+    // makes every later debugf block forever. With the per-frame framef
+    // prints that wedges the machine at a deterministic frame.
     debug_init_isviewer();
+#endif
+#ifndef MVS64_NOUSBLOG
+    // Same for the flashcart USB probe (-DMVS64_NOUSBLOG): it can
+    // false-positive under emulators, and usb_write spins on cart status.
     debug_init_usblog();
+#endif
 #endif
     debugf("MVS64\n");
     register_VI_handler(vblank_handler);
