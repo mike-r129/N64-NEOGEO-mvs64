@@ -63,6 +63,7 @@ struct z80 {
 struct z80_hot {
   z80 cpu;
   uint8_t cyc_00[256], cyc_ed[256], cyc_ddfd[256];
+  uint8_t sz53p[256];   // S Z Y X P/V flags of each result byte (z80.c)
   uintptr_t rmap[256];
   uint8_t ram[0x800];
 };

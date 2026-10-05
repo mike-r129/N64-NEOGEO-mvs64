@@ -51,10 +51,31 @@ struct z80_hot z80_hot __attribute__((aligned(16), section(".rodata.z80_hot"))) 
     4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 14, 4, 23, 4,
     15, 4, 4, 4, 8, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 10, 4, 4, 4, 4,
     4, 4},
+  // S, Z, Y, X and P/V (even parity) of every result byte: the F bits
+  // that depend only on the result (see the flag helpers).
+  .sz53p = {
+    0x44, 0x00, 0x00, 0x04, 0x00, 0x04, 0x04, 0x00, 0x08, 0x0c, 0x0c, 0x08, 0x0c, 0x08, 0x08, 0x0c,
+    0x00, 0x04, 0x04, 0x00, 0x04, 0x00, 0x00, 0x04, 0x0c, 0x08, 0x08, 0x0c, 0x08, 0x0c, 0x0c, 0x08,
+    0x20, 0x24, 0x24, 0x20, 0x24, 0x20, 0x20, 0x24, 0x2c, 0x28, 0x28, 0x2c, 0x28, 0x2c, 0x2c, 0x28,
+    0x24, 0x20, 0x20, 0x24, 0x20, 0x24, 0x24, 0x20, 0x28, 0x2c, 0x2c, 0x28, 0x2c, 0x28, 0x28, 0x2c,
+    0x00, 0x04, 0x04, 0x00, 0x04, 0x00, 0x00, 0x04, 0x0c, 0x08, 0x08, 0x0c, 0x08, 0x0c, 0x0c, 0x08,
+    0x04, 0x00, 0x00, 0x04, 0x00, 0x04, 0x04, 0x00, 0x08, 0x0c, 0x0c, 0x08, 0x0c, 0x08, 0x08, 0x0c,
+    0x24, 0x20, 0x20, 0x24, 0x20, 0x24, 0x24, 0x20, 0x28, 0x2c, 0x2c, 0x28, 0x2c, 0x28, 0x28, 0x2c,
+    0x20, 0x24, 0x24, 0x20, 0x24, 0x20, 0x20, 0x24, 0x2c, 0x28, 0x28, 0x2c, 0x28, 0x2c, 0x2c, 0x28,
+    0x80, 0x84, 0x84, 0x80, 0x84, 0x80, 0x80, 0x84, 0x8c, 0x88, 0x88, 0x8c, 0x88, 0x8c, 0x8c, 0x88,
+    0x84, 0x80, 0x80, 0x84, 0x80, 0x84, 0x84, 0x80, 0x88, 0x8c, 0x8c, 0x88, 0x8c, 0x88, 0x88, 0x8c,
+    0xa4, 0xa0, 0xa0, 0xa4, 0xa0, 0xa4, 0xa4, 0xa0, 0xa8, 0xac, 0xac, 0xa8, 0xac, 0xa8, 0xa8, 0xac,
+    0xa0, 0xa4, 0xa4, 0xa0, 0xa4, 0xa0, 0xa0, 0xa4, 0xac, 0xa8, 0xa8, 0xac, 0xa8, 0xac, 0xac, 0xa8,
+    0x84, 0x80, 0x80, 0x84, 0x80, 0x84, 0x84, 0x80, 0x88, 0x8c, 0x8c, 0x88, 0x8c, 0x88, 0x88, 0x8c,
+    0x80, 0x84, 0x84, 0x80, 0x84, 0x80, 0x80, 0x84, 0x8c, 0x88, 0x88, 0x8c, 0x88, 0x8c, 0x8c, 0x88,
+    0xa0, 0xa4, 0xa4, 0xa0, 0xa4, 0xa0, 0xa0, 0xa4, 0xac, 0xa8, 0xa8, 0xac, 0xa8, 0xac, 0xac, 0xa8,
+    0xa4, 0xa0, 0xa0, 0xa4, 0xa0, 0xa4, 0xa4, 0xa0, 0xa8, 0xac, 0xac, 0xa8, 0xac, 0xa8, 0xa8, 0xac,
+  },
 };
 #define cyc_00   z80_hot.cyc_00
 #define cyc_ed   z80_hot.cyc_ed
 #define cyc_ddfd z80_hot.cyc_ddfd
+#define sz53p    z80_hot.sz53p
 
 
 
@@ -241,24 +262,19 @@ static inline void cond_jr(z80* const z, bool condition) {
 
 // ADD Byte: adds two bytes together
 static inline uint8_t addb(z80* const z, uint8_t a, uint8_t b, bool cy) {
-  const uint8_t result = a + b + cy;
-  FSET(z, FLAG_S, result >> 7);
-  FSET(z, FLAG_Z, result == 0);
-  FSET(z, FLAG_H, carry(4, a, b, cy));
-  FSET(z, FLAG_P, carry(7, a, b, cy) != carry(8, a, b, cy));
-  FSET(z, FLAG_C, carry(8, a, b, cy));
-  FSET(z, FLAG_N, 0);
-  FSET(z, FLAG_X, GET_BIT(3, result));
-  FSET(z, FLAG_Y, GET_BIT(5, result));
-  return result;
+  // c holds the carry INTO each bit: H = carry into bit 4, C = carry out of
+  // bit 7, P/V = carry into bit 7 differs from carry out of it.
+  const unsigned r = a + b + cy;
+  const unsigned c = r ^ a ^ b;
+  z->f = (sz53p[r & 0xFF] & ~FLAG_P) | (c & FLAG_H) | ((c >> 8) & FLAG_C) |
+         ((((c >> 7) ^ (c >> 8)) & 1) << 2);
+  return r;
 }
 
 // SUBstract Byte: substracts two bytes (with optional carry)
 static inline uint8_t subb(z80* const z, uint8_t a, uint8_t b, bool cy) {
   uint8_t val = addb(z, a, ~b, !cy);
-  FSET(z, FLAG_C, !FGET(z, FLAG_C));
-  FSET(z, FLAG_H, !FGET(z, FLAG_H));
-  FSET(z, FLAG_N, 1);
+  z->f = (z->f ^ (FLAG_C | FLAG_H)) | FLAG_N;
   return val;
 }
 
@@ -326,17 +342,17 @@ static inline void sbchl(z80* const z, uint16_t val) {
 
 // increments a byte value
 static inline uint8_t inc(z80* const z, uint8_t a) {
-  bool cf = FGET(z, FLAG_C);
+  const uint8_t cf = z->f & FLAG_C;
   uint8_t result = addb(z, a, 1, 0);
-  FSET(z, FLAG_C, cf);
+  z->f = (z->f & ~FLAG_C) | cf;
   return result;
 }
 
 // decrements a byte value
 static inline uint8_t dec(z80* const z, uint8_t a) {
-  bool cf = FGET(z, FLAG_C);
+  const uint8_t cf = z->f & FLAG_C;
   uint8_t result = subb(z, a, 1, 0);
-  FSET(z, FLAG_C, cf);
+  z->f = (z->f & ~FLAG_C) | cf;
   return result;
 }
 
@@ -346,14 +362,7 @@ static inline uint8_t dec(z80* const z, uint8_t a) {
 // result in register A
 static inline void land(z80* const z, uint8_t val) {
   const uint8_t result = z->a & val;
-  FSET(z, FLAG_S, result >> 7);
-  FSET(z, FLAG_Z, result == 0);
-  FSET(z, FLAG_H, 1);
-  FSET(z, FLAG_P, parity(result));
-  FSET(z, FLAG_N, 0);
-  FSET(z, FLAG_C, 0);
-  FSET(z, FLAG_X, GET_BIT(3, result));
-  FSET(z, FLAG_Y, GET_BIT(5, result));
+  z->f = sz53p[result] | FLAG_H;
   z->a = result;
 }
 
@@ -361,14 +370,7 @@ static inline void land(z80* const z, uint8_t val) {
 // result in register A
 static inline void lxor(z80* const z, const uint8_t val) {
   const uint8_t result = z->a ^ val;
-  FSET(z, FLAG_S, result >> 7);
-  FSET(z, FLAG_Z, result == 0);
-  FSET(z, FLAG_H, 0);
-  FSET(z, FLAG_P, parity(result));
-  FSET(z, FLAG_N, 0);
-  FSET(z, FLAG_C, 0);
-  FSET(z, FLAG_X, GET_BIT(3, result));
-  FSET(z, FLAG_Y, GET_BIT(5, result));
+  z->f = sz53p[result];
   z->a = result;
 }
 
@@ -376,14 +378,7 @@ static inline void lxor(z80* const z, const uint8_t val) {
 // result in register A
 static inline void lor(z80* const z, const uint8_t val) {
   const uint8_t result = z->a | val;
-  FSET(z, FLAG_S, result >> 7);
-  FSET(z, FLAG_Z, result == 0);
-  FSET(z, FLAG_H, 0);
-  FSET(z, FLAG_P, parity(result));
-  FSET(z, FLAG_N, 0);
-  FSET(z, FLAG_C, 0);
-  FSET(z, FLAG_X, GET_BIT(3, result));
-  FSET(z, FLAG_Y, GET_BIT(5, result));
+  z->f = sz53p[result];
   z->a = result;
 }
 
@@ -394,138 +389,79 @@ static inline void cp(z80* const z, const uint8_t val) {
   // the only difference between cp and sub is that
   // the xf/yf are taken from the value to be substracted,
   // not the result
-  FSET(z, FLAG_Y, GET_BIT(5, val));
-  FSET(z, FLAG_X, GET_BIT(3, val));
+  z->f = (z->f & ~(FLAG_Y | FLAG_X)) | (val & (FLAG_Y | FLAG_X));
 }
 
 // 0xCB opcodes
 // rotate left with carry
 static inline uint8_t cb_rlc(z80* const z, uint8_t val) {
-  const bool old = val >> 7;
-  val = (val << 1) | old;
-  FSET(z, FLAG_S, val >> 7);
-  FSET(z, FLAG_Z, val == 0);
-  FSET(z, FLAG_P, parity(val));
-  FSET(z, FLAG_N, 0);
-  FSET(z, FLAG_H, 0);
-  FSET(z, FLAG_C, old);
-  FSET(z, FLAG_X, GET_BIT(3, val));
-  FSET(z, FLAG_Y, GET_BIT(5, val));
+  const uint8_t cy = val >> 7;
+  val = (val << 1) | cy;
+  z->f = sz53p[val] | cy;
   return val;
 }
 
 // rotate right with carry
 static inline uint8_t cb_rrc(z80* const z, uint8_t val) {
-  const bool old = val & 1;
-  val = (val >> 1) | (old << 7);
-  FSET(z, FLAG_S, val >> 7);
-  FSET(z, FLAG_Z, val == 0);
-  FSET(z, FLAG_N, 0);
-  FSET(z, FLAG_H, 0);
-  FSET(z, FLAG_C, old);
-  FSET(z, FLAG_P, parity(val));
-  FSET(z, FLAG_X, GET_BIT(3, val));
-  FSET(z, FLAG_Y, GET_BIT(5, val));
+  const uint8_t cy = val & 1;
+  val = (val >> 1) | (cy << 7);
+  z->f = sz53p[val] | cy;
   return val;
 }
 
 // rotate left (simple)
 static inline uint8_t cb_rl(z80* const z, uint8_t val) {
-  const bool cf = FGET(z, FLAG_C);
-  FSET(z, FLAG_C, val >> 7);
-  val = (val << 1) | cf;
-  FSET(z, FLAG_S, val >> 7);
-  FSET(z, FLAG_Z, val == 0);
-  FSET(z, FLAG_N, 0);
-  FSET(z, FLAG_H, 0);
-  FSET(z, FLAG_P, parity(val));
-  FSET(z, FLAG_X, GET_BIT(3, val));
-  FSET(z, FLAG_Y, GET_BIT(5, val));
+  const uint8_t cy = val >> 7;
+  val = (val << 1) | (z->f & FLAG_C);
+  z->f = sz53p[val] | cy;
   return val;
 }
 
 // rotate right (simple)
 static inline uint8_t cb_rr(z80* const z, uint8_t val) {
-  const bool c = FGET(z, FLAG_C);
-  FSET(z, FLAG_C, val & 1);
-  val = (val >> 1) | (c << 7);
-  FSET(z, FLAG_S, val >> 7);
-  FSET(z, FLAG_Z, val == 0);
-  FSET(z, FLAG_N, 0);
-  FSET(z, FLAG_H, 0);
-  FSET(z, FLAG_P, parity(val));
-  FSET(z, FLAG_X, GET_BIT(3, val));
-  FSET(z, FLAG_Y, GET_BIT(5, val));
+  const uint8_t cy = val & 1;
+  val = (val >> 1) | ((z->f & FLAG_C) << 7);
+  z->f = sz53p[val] | cy;
   return val;
 }
 
 // shift left preserving sign
 static inline uint8_t cb_sla(z80* const z, uint8_t val) {
-  FSET(z, FLAG_C, val >> 7);
+  const uint8_t cy = val >> 7;
   val <<= 1;
-  FSET(z, FLAG_S, val >> 7);
-  FSET(z, FLAG_Z, val == 0);
-  FSET(z, FLAG_N, 0);
-  FSET(z, FLAG_H, 0);
-  FSET(z, FLAG_P, parity(val));
-  FSET(z, FLAG_X, GET_BIT(3, val));
-  FSET(z, FLAG_Y, GET_BIT(5, val));
+  z->f = sz53p[val] | cy;
   return val;
 }
 
 // SLL (exactly like SLA, but sets the first bit to 1)
 static inline uint8_t cb_sll(z80* const z, uint8_t val) {
-  FSET(z, FLAG_C, val >> 7);
-  val <<= 1;
-  val |= 1;
-  FSET(z, FLAG_S, val >> 7);
-  FSET(z, FLAG_Z, val == 0);
-  FSET(z, FLAG_N, 0);
-  FSET(z, FLAG_H, 0);
-  FSET(z, FLAG_P, parity(val));
-  FSET(z, FLAG_X, GET_BIT(3, val));
-  FSET(z, FLAG_Y, GET_BIT(5, val));
+  const uint8_t cy = val >> 7;
+  val = (val << 1) | 1;
+  z->f = sz53p[val] | cy;
   return val;
 }
 
 // shift right preserving sign
 static inline uint8_t cb_sra(z80* const z, uint8_t val) {
-  FSET(z, FLAG_C, val & 1);
-  val = (val >> 1) | (val & 0x80); // 0b10000000
-  FSET(z, FLAG_S, val >> 7);
-  FSET(z, FLAG_Z, val == 0);
-  FSET(z, FLAG_N, 0);
-  FSET(z, FLAG_H, 0);
-  FSET(z, FLAG_P, parity(val));
-  FSET(z, FLAG_X, GET_BIT(3, val));
-  FSET(z, FLAG_Y, GET_BIT(5, val));
+  const uint8_t cy = val & 1;
+  val = (val >> 1) | (val & 0x80);
+  z->f = sz53p[val] | cy;
   return val;
 }
 
 // shift register right
 static inline uint8_t cb_srl(z80* const z, uint8_t val) {
-  FSET(z, FLAG_C, val & 1);
+  const uint8_t cy = val & 1;
   val >>= 1;
-  FSET(z, FLAG_S, val >> 7);
-  FSET(z, FLAG_Z, val == 0);
-  FSET(z, FLAG_N, 0);
-  FSET(z, FLAG_H, 0);
-  FSET(z, FLAG_P, parity(val));
-  FSET(z, FLAG_X, GET_BIT(3, val));
-  FSET(z, FLAG_Y, GET_BIT(5, val));
+  z->f = sz53p[val] | cy;
   return val;
 }
 
 // tests bit "n" from a byte
 static inline uint8_t cb_bit(z80* const z, uint8_t val, uint8_t n) {
   const uint8_t result = val & (1 << n);
-  FSET(z, FLAG_S, result >> 7);
-  FSET(z, FLAG_Z, result == 0);
-  FSET(z, FLAG_Y, GET_BIT(5, val));
-  FSET(z, FLAG_H, 1);
-  FSET(z, FLAG_X, GET_BIT(3, val));
-  FSET(z, FLAG_P, FGET(z, FLAG_Z));
-  FSET(z, FLAG_N, 0);
+  z->f = (z->f & FLAG_C) | (result & FLAG_S) | (result ? 0 : FLAG_Z | FLAG_P) |
+         (val & (FLAG_Y | FLAG_X)) | FLAG_H;
   return result;
 }
 
