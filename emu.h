@@ -4,13 +4,25 @@
 // Frameskipping mode:
 //   0 - never frameskip, game might slowdown
 //   1 - 30 FPS mode (draw one frame every two)
-//   2 - auto mode. Game will frameskip as much as necessary to keep up with 60 FPS
+// Auto frameskip on N64 is a separate build knob: make ... FRAMESKIP=n
+// (-DMVS64_FRAMESKIP=n) skips drawing up to n frames in a row when behind
+// the VI clock; see emu_render() in emu.c.
 #define CONFIG_FRAMESKIP_MODE            0
 
 #include <stdint.h>
 #include <stdbool.h>
 
-#define MVS_CLOCK         24000000
+// MVS64_QUIET: silence the per-frame debugf tracing (framef) for release
+// builds. On N64 every debugf is an ISViewer/USB write (PI transactions):
+// several lines per frame cost real frame time on hardware and flood
+// emulator logs.
+#ifdef MVS64_QUIET
+#define framef(...) ((void)0)
+#else
+#define framef(...) debugf(__VA_ARGS__)
+#endif
+
+#define MVS_CLOCK        24000000
 #define M68K_CLOCK_DIV    2
 #define FPS        		  60
 
@@ -52,5 +64,12 @@ uint32_t emu_pc(void);
 
 void emu_cpu_reset(void);
 void emu_cpu_irq(int level, bool state);
+
+// Per-frame diagnostic telemetry (emu_diag.c), instrumented N64 builds only.
+#if defined(N64) && (defined(MVS64_PCPROF) || defined(M64K_TRACECRC) || \
+    defined(MVS64_PERFCOUNT) || defined(MVS64_OPHIST) || defined(MVS64_IDLEPROBE))
+#define EMU_DIAG 1
+void emu_diag_frame(void);
+#endif
 
 #endif

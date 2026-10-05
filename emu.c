@@ -15,6 +15,7 @@
 #include "roms.h"
 #include "platform.h"
 #include "sound.h"
+#include "input_script.h"
 
 static int cpu_trace_count = 0;
 void cpu_trace(unsigned int pc) {
@@ -59,59 +60,22 @@ void cpu_start_trace(int cnt) {
 	cpu_trace_count = cnt;
 }
 
-static int g_frame;
+// Guest frame counter. Non-static: the diagnostics key on guest frames
+// (N64_FRAME is the host VI count and skews with wall speed).
+int g_frame;
 
 #ifndef N64
 // --- Headless scripted input ---------------------------------------------
-// Lets the PC emu drive menus/gameplay with the human out of the loop. The
-// script is a text file (env MVS64_INPUT) of lines: "<f0> <f1> <key>", meaning
-// hold <key> from frame f0 to f1 inclusive. <key> is one of:
-//   coin start select a b c d up down left right
-// keystate is reassigned to point at hl_keys so input.c reads our buffer.
+// Lets the PC emu drive menus/gameplay with the human out of the loop: the
+// script (env MVS64_INPUT, format in input_script.h) is applied per guest
+// frame. keystate is reassigned to point at hl_keys so input.c reads our
+// buffer.
 extern const uint8_t *keystate;
 static uint8_t hl_keys[512];
-#define HL_MAX_EVENTS 256
-static struct { int f0, f1, sc; } hl_script[HL_MAX_EVENTS];
-static int hl_nevents;
-
-static int hl_keyname_to_sc(const char *n) {
-	if (!strcmp(n, "coin"))   return PLAT_KEY_COIN_1;
-	if (!strcmp(n, "start"))  return PLAT_KEY_P1_START;
-	if (!strcmp(n, "select")) return PLAT_KEY_P1_SELECT;
-	if (!strcmp(n, "a"))      return PLAT_KEY_P1_A;
-	if (!strcmp(n, "b"))      return PLAT_KEY_P1_B;
-	if (!strcmp(n, "c"))      return PLAT_KEY_P1_C;
-	if (!strcmp(n, "d"))      return PLAT_KEY_P1_D;
-	if (!strcmp(n, "up"))     return PLAT_KEY_P1_UP;
-	if (!strcmp(n, "down"))   return PLAT_KEY_P1_DOWN;
-	if (!strcmp(n, "left"))   return PLAT_KEY_P1_LEFT;
-	if (!strcmp(n, "right"))  return PLAT_KEY_P1_RIGHT;
-	return -1;
-}
-
-static void hl_load_script(const char *path) {
-	FILE *f = fopen(path, "r");
-	if (!f) { fprintf(stderr, "[INPUT] cannot open %s\n", path); return; }
-	char line[128], key[32];
-	int f0, f1;
-	while (fgets(line, sizeof(line), f)) {
-		if (line[0] == '#' || line[0] == '\n') continue;
-		if (sscanf(line, "%d %d %31s", &f0, &f1, key) == 3) {
-			int sc = hl_keyname_to_sc(key);
-			if (sc < 0) { fprintf(stderr, "[INPUT] bad key '%s'\n", key); continue; }
-			if (hl_nevents < HL_MAX_EVENTS)
-				hl_script[hl_nevents++] = (typeof(hl_script[0])){ f0, f1, sc };
-		}
-	}
-	fclose(f);
-	fprintf(stderr, "[INPUT] loaded %d events from %s\n", hl_nevents, path);
-}
 
 static void hl_apply_input(int frame) {
 	memset(hl_keys, 0, sizeof(hl_keys));
-	for (int i = 0; i < hl_nevents; i++)
-		if (frame >= hl_script[i].f0 && frame <= hl_script[i].f1)
-			hl_keys[hl_script[i].sc] = 1;
+	input_script_keys(frame, hl_keys);
 }
 
 // --- Headless WAV capture (16-bit signed stereo, little-endian host) ---------
@@ -187,6 +151,16 @@ uint32_t profile_hw_io;
 uint32_t profile_dma_load;
 uint32_t profile_m68k;   // ticks inside the 68k core this frame (incl. MMIO)
 uint32_t profile_snd;    // ticks synthesizing audio (Z80+YM2610) this frame
+#ifdef MVS64_PERFCOUNT
+// Draw-bucket split (see emu_render): framebuffer-wait vs command issue vs
+// detach. Diagnostic builds only.
+uint32_t perf_draw_wait, perf_draw_issue, perf_draw_end;
+#endif
+#ifdef MVS64_PERFCOUNT
+// m64k_run entries this frame: sizes the per-slice constant cost (icache
+// re-entry, register save/restore) vs the per-instruction marginal cost.
+uint32_t perf_m68k_slices;
+#endif
 
 static uint64_t m68k_exec(uint64_t clock) {
 	clock /= M68K_CLOCK_DIV;
@@ -194,6 +168,9 @@ static uint64_t m68k_exec(uint64_t clock) {
 		#ifdef USE_M64K
 		#ifdef N64
 		uint32_t t0 = TICKS_READ();
+		#ifdef MVS64_PERFCOUNT
+		perf_m68k_slices++;
+		#endif
 		m68k_clock = m64k_run(&m64k, clock);
 		profile_m68k += TICKS_DISTANCE(t0, TICKS_READ());
 		#else
@@ -290,33 +267,51 @@ int cpu_irqack(void *ctx, int level)
 uint32_t emu_vblank_start(void* arg) {
 	emu_cpu_irq(1, true);
 	hw_vblank();
-	debugf("[EMU] VBlank - clock:%lld clock_frame:%lld\n", (long long)emu_clock(), (long long)emu_clock_frame());
+	framef("[EMU] VBlank - clock:%lld clock_frame:%lld\n", (long long)emu_clock(), (long long)emu_clock_frame());
 	return FRAME_CLOCK;
 }
 
 uint32_t render_time;
 
+#ifdef N64
+// Auto frameskip (make ... FRAMESKIP=n, i.e. -DMVS64_FRAMESKIP=n; 0 = off).
+// When emulation is behind the VI clock (N64_FRAME counts VIs, g_frame
+// guest frames), skip DRAWING up to n frames in a row so the game logic
+// keeps full speed instead of running in slow motion. The 68k, Z80 and
+// audio run every frame either way; only the draw is dropped. After n
+// skips the next frame always draws, and if it is still behind, the lag
+// is forgiven (N64_FRAME resynced): there is never a catch-up sprint after
+// a heavy scene. n=1 keeps the display at >= half the emulated rate.
+#ifndef MVS64_FRAMESKIP
+#define MVS64_FRAMESKIP 0
+#endif
+#if MVS64_FRAMESKIP > 0
+static uint32_t fskip_drawn, fskip_skipped;   // per-window counters ([FSKIP])
+#endif
+#endif
+
 uint32_t emu_render(void *arg) {
 
-	#ifdef N64
-	if (CONFIG_FRAMESKIP_MODE == 2) {
+	#if defined(N64) && MVS64_FRAMESKIP > 0
+	{
 		extern volatile int N64_FRAME;
-		const int MAX_SKIP = 4;
-		static int skip = 0;
+		static int skip_run = 0;
 
 		if (N64_FRAME > g_frame) {
-			skip++;
-			if (skip < MAX_SKIP) {
-				debugf("[RENDER] skip frame\n");
+			if (skip_run < MVS64_FRAMESKIP) {
+				skip_run++;
+				fskip_skipped++;
+				render_time = 0;
 				plat_audio_pump();   // audio pumps once per frame regardless
 				return FRAME_CLOCK;
 			}
-			debugf("[RENDER] max skip\n");
-			skip = 0;
+			// Drawing this one after a full skip run: forgive the lag.
 			disable_interrupts();
 			N64_FRAME = g_frame;
 			enable_interrupts();
 		}
+		skip_run = 0;
+		fskip_drawn++;
 	}
 	#endif
 
@@ -330,13 +325,27 @@ uint32_t emu_render(void *arg) {
 		}
 	}
 
-	debugf("[RENDER] render\n");
+	framef("[RENDER] render\n");
 	#ifdef N64
 	uint32_t t0 = TICKS_READ();
 	#endif
+	#if defined(N64) && defined(MVS64_PERFCOUNT)
+	// Split the draw bucket: display_get/attach wait vs command issue vs
+	// detach — tells whether draw% is CPU work or RSP/RDP back-pressure.
+	extern uint32_t perf_draw_wait, perf_draw_issue, perf_draw_end;
+	plat_beginframe();
+	perf_draw_wait = TICKS_DISTANCE(t0, TICKS_READ());
+	uint32_t t1 = TICKS_READ();
+	video_render();
+	perf_draw_issue = TICKS_DISTANCE(t1, TICKS_READ());
+	uint32_t t2 = TICKS_READ();
+	plat_endframe();
+	perf_draw_end = TICKS_DISTANCE(t2, TICKS_READ());
+	#else
 	plat_beginframe();
 	video_render();
 	plat_endframe();
+	#endif
 
 	rom_next_frame();
 
@@ -381,7 +390,7 @@ void emu_run_frame(void) {
     	g_clock = m68k_exec(vsync);
 
     // Frame completed
-	debugf("[EMU] Frame completed: %d (vsync: %llu)\n", g_frame, (unsigned long long)vsync);
+	framef("[EMU] Frame completed: %d (vsync: %llu)\n", g_frame, (unsigned long long)vsync);
     g_frame++;
 	g_clock_framebegin += FRAME_CLOCK;
 }
@@ -397,6 +406,9 @@ int main(int argc, char *argv[]) {
 	#endif
 
 	plat_init(MVS64_AUDIO_RATE, FPS);
+	#if defined(MVS64_PCPROF) && defined(N64)
+	{ extern void pcprof_init(void); pcprof_init(); }
+	#endif
 
 	#ifndef N64
 	// Headless test harness: when MVS64_FRAMES=N is set, run N frames with no
@@ -421,7 +433,7 @@ int main(int argc, char *argv[]) {
 	if (headless) {
 		keystate = hl_keys;                 // drive input from our scripted buffer
 		const char *script = getenv("MVS64_INPUT");
-		if (script) hl_load_script(script);
+		if (script) input_script_load(script);
 		const char *wav = getenv("MVS64_WAV");
 		if (wav) wav_open(wav, AUDIO_FREQ);
 	} else {
@@ -528,8 +540,15 @@ int main(int argc, char *argv[]) {
 
 		#ifdef N64
 		uint32_t emu_time = TICKS_DISTANCE(t0, TICKS_READ());
+		(void)emu_time;   // only read by framef (compiled out with MVS64_QUIET)
+		#ifdef MVS64_PERFOSD
+		{
+			extern void plat_perf_frame(uint32_t all, uint32_t m68k, uint32_t snd, uint32_t draw);
+			plat_perf_frame(emu_time, profile_m68k, profile_snd, render_time);
+		}
+		#endif
 
-		debugf("[PROFILE] cpu:%.2f%% m68k:%.2f%% snd:%.2f%% io:%.2f%% draw:%.2f%% dma:%.2f%% PC:%06lx\n",
+		framef("[PROFILE] cpu:%.2f%% m68k:%.2f%% snd:%.2f%% io:%.2f%% draw:%.2f%% dma:%.2f%% PC:%06lx\n",
 			(float)emu_time * 100.f / (float)(TICKS_PER_SECOND / 60),
 			(float)profile_m68k * 100.f / (float)(TICKS_PER_SECOND / 60),
 			(float)profile_snd * 100.f / (float)(TICKS_PER_SECOND / 60),
@@ -541,19 +560,8 @@ int main(int argc, char *argv[]) {
 			#else
 			(uint32_t)m68k_get_reg(NULL, M68K_REG_PC));
 			#endif
-		#if defined(MVS64_IDLEPROBE) && defined(USE_M64K)
-		{
-			// Idle-loop discovery (EXTRA_DEFINES=-DMVS64_IDLEPROBE): a branch
-			// target the interpreter hit 4000 times in a row is a wait loop
-			// candidate for the game's idle_skip list (check it disassembles
-			// to a pure poll before adding it).
-			extern uint32_t idle_probe_found;
-			if (idle_probe_found) {
-				debugf("[IDLEPROBE] long spin at 68k pc=%06lx\n",
-					(unsigned long)(idle_probe_found & 0xFFFFFF));
-				idle_probe_found = 0;
-			}
-		}
+		#ifdef EMU_DIAG
+		emu_diag_frame();
 		#endif
 		#endif
 
@@ -564,6 +572,20 @@ int main(int argc, char *argv[]) {
 			fps_frame = g_frame;
 			fps_time = curtime;
 		}
+		#if MVS64_FRAMESKIP > 0
+		// Guest-frame-keyed speed window: scripted input is frame-counted, so
+		// window k covers the same game content in every build. Emulated
+		// fps = 300000 / ms; displayed fps = drawn * 1000 / ms.
+		if ((g_frame % 300) == 0) {
+			static uint32_t fsk_t0;
+			if (fsk_t0)
+				debugf("[FSKIP] f=%d ms=%lu drawn=%lu skipped=%lu\n", g_frame,
+					(unsigned long)(TICKS_DISTANCE(fsk_t0, curtime) / (TICKS_PER_SECOND / 1000)),
+					(unsigned long)fskip_drawn, (unsigned long)fskip_skipped);
+			fsk_t0 = curtime;
+			fskip_drawn = fskip_skipped = 0;
+		}
+		#endif
 		#endif
 	}
 

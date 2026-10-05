@@ -9,7 +9,7 @@ BUILD_DIR = build/mvs64
 
 include $(N64_INST)/include/n64.mk
 
-core_src = emu.c roms.c hw.c video.c platform_n64.c sprite_cache.c sound_neogeo.c z80_anchor.c z80.c ym2610/ym2610.c lib/rdl.c $(wildcard hle_*.c)
+core_src = emu.c emu_diag.c input_script.c roms.c hw.c video.c platform_n64.c platform_n64_osd.c sprite_cache.c sound_neogeo.c z80_anchor.c z80.c ym2610/ym2610.c lib/rdl.c pcprof.c $(wildcard hle_*.c)
 rsp = rsp_video.S rsp_audio.S rsp_fm.S
 ifdef MUSASHI
 # Fallback 68k core: portable Musashi (the PC build's core). Much slower than
@@ -48,6 +48,12 @@ CFLAGS += -DM64K_FASTPATHS
 ASFLAGS += -DM64K_FASTPATHS
 N64_ASFLAGS += -DM64K_FASTPATHS
 endif
+# Deterministic per-slice 68k state hash printed per frame ([TRCRC]): the
+# state gate for m64k changes (equal streams = identical 68k execution).
+# Opt-in: make ... TRCRC_ON=1.
+ifdef TRCRC_ON
+CFLAGS += -DM64K_TRACECRC
+endif
 endif
 obj = $(src:%.c=$(BUILD_DIR)/%.o) $(asm:%.S=$(BUILD_DIR)/%.o) $(rsp:%.S=$(BUILD_DIR)/%.o)
 
@@ -81,6 +87,21 @@ ifndef WP_OFF
 CFLAGS += -DMVS64_RSPFM -DMVS64_RSPWP
 endif
 
+# Scripted input for unattended runs (make ... INPUT=<file>): the file, in
+# the PC harness's MVS64_INPUT format (see input_script.h), is packed into
+# the DFS as input.txt and replayed by guest frame on top of the pad. Also
+# turns on the audio-health telemetry (SND_HEALTH, sound_neogeo.c).
+ifdef INPUT
+CFLAGS += -DMVS64_AUTOINPUT
+endif
+
+ifdef FRAMESKIP
+# Auto frameskip: skip drawing up to $(FRAMESKIP) frames in a row when the
+# emulation is behind the VI clock, so game speed holds (emu_render, emu.c).
+# Default off (0): the game slows down instead.
+CFLAGS += -DMVS64_FRAMESKIP=$(FRAMESKIP)
+endif
+
 # NOTE: the audio TUs (ym2610.c/z80.c/sound_neogeo.c) stay at -O2, measured
 # both ways on N64: -O3 made in-game sound time ~40% worse (the inline/unroll
 # bloat thrashes the VR4300 16KB icache in the synthesis loop), and -Os was
@@ -95,9 +116,10 @@ all: mvsmakerom mvs64-${ROMNAME}.z64
 test:
 	make -f Makefile.tests all
 
-$(BUILD_DIR)/mvs64-${ROMNAME}.dfs: $(ROM) mvsmakerom
+$(BUILD_DIR)/mvs64-${ROMNAME}.dfs: $(ROM) mvsmakerom $(INPUT)
 	@echo "    [MVS] ${ROMDIR}"
 	./mvsmakerom $(BIOS) $(ROM)
+	$(if $(INPUT),cp $(INPUT) $(ROMDIR)/input.txt,rm -f $(ROMDIR)/input.txt)
 	@echo "    [DFS] $@"
 	$(N64_MKDFS) $@ $(ROMDIR) >/dev/null
 

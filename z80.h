@@ -68,6 +68,7 @@ void z80_gen_int(z80* const z, uint8_t data);
 // away; interrupt servicing stays out of line. Identical to z80_step.
 void z80_exec_opcode(z80* const z, uint8_t opcode);
 void z80_process_interrupts(z80* const z);
+#ifndef MVS64_Z80OPHIST
 static inline void z80_step_inline(z80* const z) {
   uint8_t opcode = 0x00;               // HALT executes NOPs in place
   if (!z->halted) {
@@ -78,5 +79,8 @@ static inline void z80_step_inline(z80* const z) {
   if (z->iff_delay | (uint8_t)(z->nmi_pending | (z->int_pending & z->iff1)))
     z80_process_interrupts(z);
 }
+#else
+#define z80_step_inline z80_step
+#endif
 
 #endif // Z80_Z80_H_

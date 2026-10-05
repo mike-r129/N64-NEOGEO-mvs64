@@ -38,6 +38,9 @@ unsigned int v_rom_size;
 unsigned int vb_rom_size;   // 0 unless the set has separate ADPCM-B ROMs
 
 extern uint32_t profile_dma_load;
+#ifdef MVS64_PERFCOUNT
+uint32_t perf_vrom_reads, perf_vrom_ticks;   // ADPCM V-ROM refills ([PERF3])
+#endif
 
 static SpriteCache srom_cache;
 static SpriteCache crom_cache;
@@ -194,9 +197,29 @@ uint8_t* crom_get_sprite(int spritenum) {
 
 	#ifdef N64
 	profile_dma_load -= TICKS_READ();
+	#ifdef MVS64_PERFCOUNT
+	{
+		// Per-frame C-ROM miss count + DMA ticks ([PERF3], emu_diag.c):
+		// the unique-tile floor of the draw path's cache bucket.
+		extern uint32_t perf_dr_miss;
+		perf_dr_miss++;
+	}
+	#endif
+	#if defined(MVS64_PERFCOUNT) || defined(MVS64_PERFOSD)
+	{
+		extern uint32_t perf_dr_missticks;   // also the PERFOSD C line
+		perf_dr_missticks -= TICKS_READ();
+	}
+	#endif
 	dfs_seek(crom_file, spritenum*8*16, SEEK_SET);
 	dfs_read(pix, 1, 8*16, crom_file);
 	data_cache_hit_writeback_invalidate(pix, 8*16);  // FIXME: should not be required
+	#if defined(MVS64_PERFCOUNT) || defined(MVS64_PERFOSD)
+	{
+		extern uint32_t perf_dr_missticks;
+		perf_dr_missticks += TICKS_READ();
+	}
+	#endif
 	profile_dma_load += TICKS_READ();
 	#else
 	fseek(crom_file, spritenum*8*16, SEEK_SET);
@@ -621,9 +644,16 @@ static void vrom_read_region(int r, uint32_t offset, uint8_t *buf, int len) {
 	#ifdef N64
 	if (vrom_file[r] < 0) { memset(buf, 0, len); return; }
 	profile_dma_load -= TICKS_READ();
+	#ifdef MVS64_PERFCOUNT
+	perf_vrom_reads++;                 // [PERF3] vrom=/vromt= (ADPCM refills)
+	perf_vrom_ticks -= TICKS_READ();
+	#endif
 	dfs_seek(vrom_file[r], offset, SEEK_SET);
 	dfs_read(buf, 1, len, vrom_file[r]);
 	data_cache_hit_writeback_invalidate(buf, len);  // FIXME: should not be required
+	#ifdef MVS64_PERFCOUNT
+	perf_vrom_ticks += TICKS_READ();
+	#endif
 	profile_dma_load += TICKS_READ();
 	#else
 	if (!vrom_file[r]) { memset(buf, 0, len); return; }

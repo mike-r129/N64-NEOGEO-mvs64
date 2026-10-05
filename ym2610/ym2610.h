@@ -23,6 +23,10 @@ u32 ym2610_time_now_cyc(void);
 #define FM_GET_TIME_NOW_CYC() ym2610_time_now_cyc()
 #define FM_TIMEBASE_CYC_PER_SEC 4000000 /* Z80 clock: the cycle domain above */
 
+#if defined(MVS64_AUTOINPUT) || defined(MVS64_SNDHEALTH) || defined(MVS64_SNDOSD)
+/* MVS64 diagnostic: snapshot of all tone-holding state ([YMSTATE] telemetry) */
+int ym2610_dbg_state(char *o, int n);
+#endif
 
 /* MVS64: streamed ADPCM sample fetch, implemented by the sound module. Used
  * when the ADPCM sample ROM is not resident (pcmbuf NULL but pcmsize > 0): the

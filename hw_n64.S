@@ -8,22 +8,62 @@
 #define SAFE_MODE           1
 
 
-# Trap-time accounting for the [PROFILE] io% column costs ~10 instructions
-# (two COUNT reads + two RMW stores) on every MMIO trap, ~1k traps per busy
-# frame, so the trap path no longer does it: io% reads 0.
+# Trap-time accounting for the [PROFILE] io% column. ~10 instructions (two
+# COUNT reads + two RMW stores) on every MMIO trap, ~1k traps per busy frame,
+# so it is compiled in only for PERFCOUNT builds; elsewhere io% reads 0.
+#ifdef MVS64_PERFCOUNT
+.macro PROFILE_START
+	mfc0 k0, C0_COUNT
+	lw k1, profile_hw_io
+	subu k1, k0
+	la k0, profile_hw_io
+	sw k1, 0(k0)
+.endm
+
+.macro PROFILE_END
+	mfc0 k0, C0_COUNT
+	lw k1, profile_hw_io
+	addu k1, k0
+	la k0, profile_hw_io
+	sw k1, 0(k0)
+.endm
+#else
 .macro PROFILE_START
 .endm
 
 .macro PROFILE_END
 .endm
+#endif
 
 	.section .sdata
+#ifdef MVS64_PERFCOUNT
+# Per-frame TLB-exception count (read+reset by emu_diag.c's [PERF] print).
+	.globl perf_tlb_faults
+perf_tlb_faults: .long 0
+	.globl perf_trap_ring_n
+perf_trap_ring_n: .long 0
+	.globl perf_trap_ring_skip
+perf_trap_ring_skip: .long 0
+	.section .bss
+	.balign 8
+	.globl perf_trap_hist
+perf_trap_hist: .space 512*4
+	.globl perf_trap_ring
+perf_trap_ring: .space 1024*8
+	.section .sdata
+#endif
 
 	.set noreorder
 	.set noat
 	.text
 mvs_tlbhandler:
 	PROFILE_START
+#ifdef MVS64_PERFCOUNT
+	la k0, perf_tlb_faults
+	lw k1, 0(k0)
+	addiu k1, 1
+	sw k1, 0(k0)
+#endif
 	# Check whether the faulting address is at address 0xFFxxxxxx, which is
 	# where the m68k memory map is TLB-mapped. Otherwise, go to the standard
 	# exception handler.
@@ -60,6 +100,57 @@ tlbcallhandler:
 	sd $1,   4*8(sp)   # at
 	sd $14, 17*8(sp)   # t6 (all stores by m64k are made with this register)
 	sd $31, 21*8(sp)   # ra (this allows backtracing to work corretly across TLB miss exceptions)
+#ifdef MVS64_PERFCOUNT
+	# Trap histogram (emu_diag.c [TRAPH]): perf_trap_hist[rw*256 + (addr>>16)],
+	# rw = opcode bit 3 (stores). v0 parked in arg slot 0 (no call yet).
+	sd $2, 0(sp)
+	srl $1, k1, 14
+	andi $1, 0x3FC
+	srl $2, k0, 29
+	andi $2, 1
+	sll $2, 10
+	addu $1, $2
+	la $2, perf_trap_hist
+	addu $1, $2
+	lw $2, 0($1)
+	addiu $2, 1
+	sw $2, 0($1)
+	# Sample ring ([TRAPS]): every 1024th LSPC-page (0x3Cxxxx) store trap
+	# (a uniform sample over the window; the first-N ring caught one burst)
+	# up to 1024 after a reset, as (host EPC, m_pc) pairs - which path and
+	# which guest code still trap. v1 parked in arg slot 1.
+	srl $1, k1, 16
+	xori $1, $1, 0x3C
+	bnez $1, 9f
+	 nop
+	srl $1, k0, 29
+	andi $1, $1, 1
+	beqz $1, 9f
+	 nop
+	sd $3, 8(sp)
+	la $1, perf_trap_ring_skip
+	lw $2, 0($1)
+	addiu $3, $2, 1
+	sw $3, 0($1)
+	andi $2, $2, 1023
+	bnez $2, 8f
+	 nop
+	la $1, perf_trap_ring_n
+	lw $2, 0($1)
+	sltiu $3, $2, 1024
+	beqz $3, 8f
+	 addiu $3, $2, 1
+	sw $3, 0($1)
+	sll $2, $2, 3
+	la $1, perf_trap_ring
+	addu $1, $1, $2
+	mfc0 $2, C0_EPC
+	nop
+	sw $2, 0($1)
+	sw t5, 4($1)
+8:	ld $3, 8(sp)
+9:	ld $2, 0(sp)
+#endif
 	.set at            # we can use assembly macros now to simplify our job
 
 	# Check whether the opcode is SWL or SWR. These are used by m64k to
@@ -822,6 +913,7 @@ asm_pbrom_bankno_w:
 	jr ra
 
 
+#ifndef MVS64_PERFCOUNT
 # Layout pin. m64k_asm.o links right after this object, so the size of this
 # .text decides which icache sets the whole 68k interpreter lands on (it
 # starts at 0x80000e00 today). Hold it fixed: growing past the mark is an
@@ -829,3 +921,4 @@ asm_pbrom_bankno_w:
 # re-baseline: bump the size, then re-measure the 68k and sound times.
 #define HW_N64_TEXT_SIZE 0x980
 	.org HW_N64_TEXT_SIZE
+#endif

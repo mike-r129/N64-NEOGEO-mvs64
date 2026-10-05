@@ -153,6 +153,50 @@ void m64k_exception_interrupt(m64k_t *m64k, int level)
     m64k->cycles += __m64k_exception_cycle_table[24 + level];
 }
 
+#ifdef M64K_TRACECRC
+/* Deterministic per-slice 68k state hash (make TRCRC_ON=1): after every
+ * interpreter slice the full architectural state is folded into a running
+ * hash, printed+reset once per frame by emu_diag.c ([TRCRC]). Two runs of
+ * the same inputs must produce identical streams, so a change that must not
+ * alter 68k execution is gated on matching the stream frame by frame. */
+uint32_t __m64k_tracecrc = 2166136261u;
+uint32_t __m64k_tracecrc_slices;
+#ifdef M64K_TRCRC_SPLIT
+// Diagnostic split (-DM64K_TRCRC_SPLIT): the classic hash mixes
+// per-slice pc and the running cycle total, so a pure slice-boundary/charge
+// displacement diverges it forever while guest CONTENT stays identical.
+// The content hash (registers/SR only) separates the two classes.
+uint32_t __m64k_tracecrc_content = 2166136261u;
+#endif
+
+static void tracecrc_slice(const m64k_t *m64k)
+{
+    uint32_t h = __m64k_tracecrc;
+    #define MIX(v) (h = (h ^ (uint32_t)(v)) * 2654435761u)
+    MIX(m64k->pc);
+    for (int i = 0; i < 8; i++) MIX(m64k->dregs[i]);
+    for (int i = 0; i < 8; i++) MIX(m64k->aregs[i]);
+    MIX(m64k->usp);
+    MIX(m64k->ssp);
+    MIX(m64k->sr);
+    MIX((uint32_t)m64k->cycles);
+    MIX((uint32_t)((uint64_t)m64k->cycles >> 32));
+    #undef MIX
+    __m64k_tracecrc = h;
+    __m64k_tracecrc_slices++;
+#ifdef M64K_TRCRC_SPLIT
+    h = __m64k_tracecrc_content;
+    #define MIX(v) (h = (h ^ (uint32_t)(v)) * 2654435761u)
+    for (int i = 0; i < 8; i++) MIX(m64k->dregs[i]);
+    for (int i = 0; i < 8; i++) MIX(m64k->aregs[i]);
+    MIX(m64k->usp);
+    MIX(m64k->ssp);
+    MIX(m64k->sr);
+    #undef MIX
+    __m64k_tracecrc_content = h;
+#endif
+}
+#endif
 
 int64_t m64k_run(m64k_t *m64k, int64_t until)
 {
@@ -205,6 +249,9 @@ int64_t m64k_run(m64k_t *m64k, int64_t until)
             m64k->pending_exc[0] = 0;
         }
 
+        #ifdef M64K_TRACECRC
+        tracecrc_slice(m64k);
+        #endif
     }
 
     return m64k->cycles;

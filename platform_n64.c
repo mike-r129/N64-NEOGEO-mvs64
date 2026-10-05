@@ -3,14 +3,40 @@
 #include <memory.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include "platform_n64_osd.h"
+#include "input_script.h"
 
-// Telemetry logger — see platform.h. Writes to the libdragon debug channels
-// (USB + emulator ISViewer, via stderr/debugf).
+// Audio-health telemetry (see sound_neogeo.c). MVS64_SNDHEALTH enables the
+// [AIPUMP] USB log; MVS64_AUTOINPUT (scripted runs) implies it.
+// MVS64_SNDOSD additionally draws the audio-health numbers on screen (see
+// plat_endframe) so a real console diagnoses sound loss with no cable or SD
+// card pull — it implies the SD/USB telemetry too.
+#if defined(MVS64_AUTOINPUT) || defined(MVS64_SNDHEALTH) || defined(MVS64_SNDOSD)
+#define SND_HEALTH 1
+#endif
+
+// Durable on-SD telemetry sink for SND_HEALTH builds (NULL if unavailable, e.g.
+// the cart's SD isn't supported or this isn't a health build). plat_log() writes
+// here in addition to the debug channels; plat_audio_pump() periodically
+// close+reopens it so the log survives a power-off (see notes there).
+#ifdef SND_HEALTH
+static FILE *g_sdlog = NULL;
+#endif
+
+// Telemetry logger — see platform.h. Mirrors to the SD log (if open) and to the
+// libdragon debug channels (USB + emulator ISViewer, via stderr/debugf).
 void plat_log(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
+#ifdef SND_HEALTH
+    if (g_sdlog) {
+        va_start(ap, fmt);
+        vfprintf(g_sdlog, fmt, ap);
+        va_end(ap);
+    }
+#endif
 }
 
 volatile int N64_FRAME = 0;
@@ -56,9 +82,17 @@ static int audio_enabled = 0;
 #define AI_NUM_BUFFERS 4          // AI back buffers handed to audio_init
 
 #ifdef MVS64_RSPWP
-// rspq lost-wakeup watchdog kicks (see plat_audio_pump).
+// rspq lost-wakeup watchdog kicks (see plat_audio_pump); file-scope so the
+// SNDOSD overlay / [AIPUMP] telemetry can report it.
 static uint32_t rspwp_wedge_kicks;
 #endif
+// Highpri-wedge recoveries performed inside libdragon's RSP wait loops by the
+// vendored patch (patches/libdragon-rspq-highpri-wedge.patch). Weak so the
+// ROM still links against an unpatched toolchain (then it always reads 0).
+extern uint32_t __rspq_wedge_recoveries __attribute__((weak));
+static inline uint32_t rspq_wedge_recoveries(void) {
+    return &__rspq_wedge_recoveries ? __rspq_wedge_recoveries : 0;
+}
 // rspq lowpri command-buffer size, read by libdragon's rspq_init through the
 // vendored patch (patches/libdragon-rspq-lowpri-size.patch); an unpatched
 // toolchain ignores both and keeps upstream's 0x200 words. A busy frame
@@ -123,10 +157,48 @@ static void vblank_handler(void) {
     N64_FRAME++;
 }
 
+#ifdef MVS64_DET_AUDIO
+static int det_fps = 60;   // guest fps for MVS64_DET_AUDIO's fixed quantum
+#endif
+
 void plat_init(int audiofreq, int fps) {
+#ifdef MVS64_DET_AUDIO
+    det_fps = fps > 0 ? fps : 60;
+#endif
 #ifdef __LIBDRAGON_DEBUG_H
+#ifndef MVS64_NOISVIEWER
+    // -DMVS64_NOISVIEWER skips this: some emulators (BizHawk-Mupen) falsely
+    // pass ISViewer detection but never drain it, and a full ISViewer buffer
+    // makes every later debugf block forever. With the per-frame framef
+    // prints that wedges the machine at a deterministic frame.
     debug_init_isviewer();
+#endif
+#ifndef MVS64_NOUSBLOG
+    // Same for the flashcart USB probe (-DMVS64_NOUSBLOG): it can
+    // false-positive under emulators, and usb_write spins on cart status.
     debug_init_usblog();
+#endif
+#endif
+#ifdef SND_HEALTH
+    // Mount the flashcart's SD (FAT) and open a durable telemetry log the user can
+    // read on a PC after reproducing on real hardware — no USB cable or host
+    // capture tool needed. We own the FILE* (rather than libdragon's
+    // debug_init_sdlog) so plat_audio_pump() can periodically close+reopen it:
+    // FatFs commits a file's directory entry (its size) only on close, so without
+    // that the log shows up empty/truncated on a PC after a power-off. Requires a
+    // cart whose SD libdragon can drive (64drive / EverDrive-64 X-series, v3).
+    if (debug_init_sdfs("sd:/", -1)) {
+        g_sdlog = fopen("sd:/mvs64log.txt", "w");
+        if (g_sdlog) {
+            setvbuf(g_sdlog, NULL, _IOLBF, 0);   // line-buffered: flush each '\n'
+            debugf("[SDLOG] writing to sd:/mvs64log.txt\n");
+            plat_log("[SDLOG] mvs64 SND_HEALTH telemetry log start\n");
+        } else {
+            debugf("[SDLOG] fopen sd:/mvs64log.txt FAILED\n");
+        }
+    } else {
+        debugf("[SDLOG] debug_init_sdfs FAILED (cart SD not supported?)\n");
+    }
 #endif
     debugf("MVS64\n");
     register_VI_handler(vblank_handler);
@@ -142,6 +214,9 @@ void plat_init(int audiofreq, int fps) {
 	extern int mvs64_display_buffers;   // 3 (see plat_detach_show), or 2
 	display_init(RESOLUTION_320x240, DEPTH_16_BPP, mvs64_display_buffers, GAMMA_NONE, ANTIALIAS_RESAMPLE);
     dfs_init(DFS_DEFAULT_LOCATION);
+#ifdef MVS64_AUTOINPUT
+    input_script_load("rom:/input.txt");
+#endif
     rdpq_init();
     // rdpq_debug_start();
 
@@ -195,6 +270,12 @@ static void aring_push(const int16_t *src, int n) {
 
 static int16_t stage[2048 * 2];
 
+#ifdef MVS64_PERFCOUNT
+uint32_t perf_snd_pub;         // publish cost this frame (blocking finish +
+                               // ring copy) = the profile_snd share that is
+                               // NOT sound_gen_samples. Read+reset by emu_diag.c.
+                               // Stays defined without RSPWP (always 0 then).
+#endif
 
 #ifdef MVS64_RSPWP
 // Cross-pump output deferral (whole-pump offload).
@@ -214,8 +295,18 @@ static void wp_publish(void) {
     t0 = TICKS_READ();
     YM2610_wp_finish();        // usually instant: the RSP had the whole window
     profile_snd += TICKS_DISTANCE(t0, TICKS_READ());
+#ifdef MVS64_DET_AUDIO
+    // det-quantum generation can outrun the wall-rate reader: drop instead
+    // of overwriting unread frames (host-side loss only; see pump comment).
+    if (aring_wr - aring_rd + (uint32_t)wp_pending_n <= ARING_FRAMES)
+        aring_push(stage, wp_pending_n);
+#else
     aring_push(stage, wp_pending_n);
+#endif
     wp_pending_n = 0;
+#ifdef MVS64_PERFCOUNT
+    perf_snd_pub += TICKS_DISTANCE(t0, TICKS_READ());
+#endif
 }
 #endif
 
@@ -277,6 +368,9 @@ void plat_audio_pump(void) {
     // is normally a no-op poll.
     wp_publish();
 #endif
+#ifdef SND_HEALTH
+    uint32_t _t0 = TICKS_READ();
+#endif
     const int buflen = audio_get_buffer_length();
     const int n = buflen <= 2048 ? buflen : 2048;
     // Ring headroom kept staged ahead of the ISR. Two buffers (~80ms @11kHz)
@@ -301,6 +395,25 @@ void plat_audio_pump(void) {
     } else {
         underrun_streak = 0;
     }
+#ifdef MVS64_DET_AUDIO
+    // GATE-BUILD DETERMINISM: the stock fill loop below tops the ring up
+    // toward TARGET_LEAD, but aring_rd advances in the AI interrupt at
+    // REAL VR4300 rate — so the NUMBER of sound_gen_samples() passes per
+    // guest frame depends on wall speed, and the Z80/YM phase the 68k
+    // observes through its 0x320000 reply polls forks at marginal
+    // handshake moments, and two builds' TRCRC streams diverge for reasons
+    // that have nothing to do with the change under test. Under this
+    // knob: generate EXACTLY one guest-frame's worth of samples per pump
+    // (accumulator carries the remainder), ignore the ring level and the
+    // wall-driven governor, and pin sound_silent. The ring may over/
+    // underrun — host-side only; gate builds are not for listening.
+    sound_silent = 0;
+    underrun_streak = 0;
+    static uint32_t det_carry;
+    uint32_t det_want = det_carry + (uint32_t)audio_get_frequency();
+    int det_samples = (int)(det_want / (uint32_t)det_fps);
+    det_carry = det_want % (uint32_t)det_fps;
+#endif
 
     // Overload governor: in sustained starvation, generation is slower than
     // real time and the output is zeros anyway (sound_silent), so grinding
@@ -313,6 +426,12 @@ void plat_audio_pump(void) {
     int pass_budget = (underrun_streak >= 1) ? 1 : AI_NUM_BUFFERS;
 
     int filled = 0;
+#ifdef SND_HEALTH
+    int discarded = 0;                  // safety-valve buffers ([AIPUMP] discard=)
+#endif
+#ifdef MVS64_DET_AUDIO
+    pass_budget = 1000000;              // the det quantum is the only limit
+#endif
 
     // Top the ring up toward TARGET_LEAD. The ISR consumes exactly n frames
     // per callback, so lead is always a multiple of n.
@@ -322,7 +441,12 @@ void plat_audio_pump(void) {
 #ifdef MVS64_RSPWP
         lead += (uint32_t)wp_pending_n;   // deferred buffer counts as staged
 #endif
+#ifdef MVS64_DET_AUDIO
+        if (filled * n >= det_samples) break;   // fixed guest quantum
+        (void)lead; (void)TARGET_LEAD;
+#else
         if (lead + (uint32_t)n > TARGET_LEAD) break;   // topped up
+#endif
 #ifdef MVS64_RSPWP
         wp_publish();          // free the staging buffer before reusing it
 #endif
@@ -332,7 +456,12 @@ void plat_audio_pump(void) {
 #ifdef MVS64_RSPWP
         wp_pending_n = n;      // defer the publish to the next pump entry
 #else
+#ifdef MVS64_DET_AUDIO
+        if (aring_wr - aring_rd + (uint32_t)n <= ARING_FRAMES)
+            aring_push(stage, n);       // else drop: host-side loss only
+#else
         aring_push(stage, n);
+#endif
 #endif
         filled++;
     }
@@ -377,6 +506,9 @@ void plat_audio_pump(void) {
 #endif
             profile_snd += TICKS_DISTANCE(snd_t0, TICKS_READ());
             wall_due -= n;
+#ifdef SND_HEALTH
+            discarded++;
+#endif
         }
     }
 
@@ -388,6 +520,53 @@ void plat_audio_pump(void) {
     // old (pre-deferral) behavior.
     if (wp_pending_n && aring_wr - aring_rd < (uint32_t)n)
         wp_publish();
+#endif
+
+#ifdef SND_HEALTH
+    // Delivery-health probe (USB/ISViewer).
+    //   buffers/60 = ring fills per 60 passes; ~= real-time rate at speed.
+    //   starved = frames the ISR padded with silence this window. Boot-jingle
+    //             and load-hitch windows may show bursts (audible as brief
+    //             silence — never a stuck tone); must be ~0 in steady state.
+    //   discard>0 = the AI interrupt stopped consuming (broken emulator AI —
+    //             never on real HW or ares). If this fires, delivery is dead.
+    //   lead    = ring fill in frames at print time (expect n..2n).
+    //   sndms   = avg wall-clock ms synthesising audio per pump; >=16.7ms
+    //             means real-time synthesis can't keep up (the perf wall).
+    {
+        static int pumps = 0, total = 0, deep = 0, maxf = 0, disc = 0;
+        static uint32_t starvedsum = 0;
+        static uint32_t tacc = 0;
+        tacc += TICKS_DISTANCE(_t0, TICKS_READ());
+        total += filled; if (filled > maxf) maxf = filled;
+        disc += discarded;
+        starvedsum += starved;
+        if (underrun_streak) deep++;
+        if ((pumps++ % 60) == 0) {
+#ifdef MVS64_RSPWP
+            uint32_t kicks = rspwp_wedge_kicks;
+#else
+            uint32_t kicks = 0;
+#endif
+            plat_log("[AIPUMP] pass=%d buffers/60=%d maxfill=%d underruns=%d discard=%d starved=%u lead=%u sndms=%.2f silent=%d off=%lx deaths=%lu revives=%lu kicks=%lu hpwedge=%lu\n",
+                     pumps, total, maxf, deep, disc, starvedsum,
+                     (uint32_t)(aring_wr - aring_rd),
+                     (float)tacc * 1000.f / (float)TICKS_PER_SECOND / 60.f, sound_silent,
+                     (unsigned long)YM2610_offload_flags(),
+                     (unsigned long)ym_off_deaths, (unsigned long)ym_off_revives,
+                     (unsigned long)kicks, (unsigned long)rspq_wedge_recoveries());
+            total = 0; maxf = 0; tacc = 0; disc = 0; deep = 0; starvedsum = 0;
+            // Commit the SD log to the card so it survives a power-off. FatFs only
+            // writes the directory entry (file size) on close, so we close+reopen
+            // in append mode here; until this runs the file can appear empty on a
+            // PC. Cheap at this cadence (~1/s at speed; ~1/15s during the slow boot).
+            if (g_sdlog) {
+                fclose(g_sdlog);
+                g_sdlog = fopen("sd:/mvs64log.txt", "a");
+                if (g_sdlog) setvbuf(g_sdlog, NULL, _IOLBF, 0);
+            }
+        }
+    }
 #endif
 
 #if defined(MVS64_RSPWP) && defined(MVS64_RSPQ_WEDGETEST)
@@ -433,6 +612,22 @@ int plat_poll(void) {
     if (ckeys.c[0].C_down)  { keystate[PLAT_KEY_P1_C] = 1; }
     if (ckeys.c[0].C_right) { keystate[PLAT_KEY_P1_D] = 1; }
     if (ckeys.c[0].start)   { keystate[PLAT_KEY_P1_START] = 1; }
+    // Z inserts a coin/credit (the MVS has no coin without this); C-up = select.
+    if (ckeys.c[0].Z)       { keystate[PLAT_KEY_COIN_1] = 1; }
+    if (ckeys.c[0].C_up)    { keystate[PLAT_KEY_P1_SELECT] = 1; }
+
+#ifdef MVS64_AUTOINPUT
+    // Scripted input (make ... INPUT=<file>): replays rom:/input.txt, the
+    // PC headless harness's MVS64_INPUT format, keyed by guest frame. The
+    // state set here is read during the next emulated frame, g_frame, the
+    // same frame the PC harness applies it to, so identical scripts give
+    // both builds identical input (and comparable traces) at any N64 speed.
+    {
+        extern int g_frame;
+        input_script_keys(g_frame, keystate);
+        if ((g_frame % 120) == 0) plat_log("[AUTOINPUT] frame=%d\n", g_frame);
+    }
+#endif
 
     return 1;
 }
@@ -447,6 +642,10 @@ void plat_save_screenshot(const char *fn) {
 
 uint8_t *g_screen_ptr;
 int g_screen_pitch;
+
+#if defined(MVS64_FBCRC) || defined(MVS64_SNDOSD)
+static surface_t *osd_disp;
+#endif
 
 // Display buffering. With 2 buffers, display_get blocks until the buffer on
 // screen is released at the NEXT vblank, so at 35-45 fps the CPU idled ~7.5
@@ -483,20 +682,124 @@ static void plat_detach_show(void) {
 }
 
 void plat_beginframe(void) {
+#ifdef MVS64_PERFOSD
+    uint32_t posd_t0 = TICKS_READ();
+#endif
     surface_t *rdp_disp = display_get();
     // Previous frame fence (see plat_detach_show): its RDP work, and so all
     // of its RSP commands, must be done before this frame reuses cache slots
     // and palette buffers. Trivially true in 2-buffer and draining builds.
     while ((int32_t)(frames_issued - frames_done) > 0) {}
+#ifdef MVS64_PERFOSD
+    posd_wait += TICKS_DISTANCE(posd_t0, TICKS_READ());
+#endif
+#ifdef MVS64_FBCRC_PIPE
+    // Pixel gate for the pipelined (3-buffer) path: after the fence, the
+    // previous frame's buffer is final and not yet reused - hash it (same
+    // FNV-1a over 320x224 as MVS64_FBCRC, keyed by that frame's g_frame) and
+    // compare with a drained 2-buffer FBCRC baseline (both DET_AUDIO).
+    {
+        extern int g_frame;
+        static surface_t *prev_disp;
+        static int prev_key = -1;
+        if (prev_disp && prev_key >= 0)
+            plat_log("[FBCRC] %lu %08lx\n", (unsigned long)prev_key,
+                     (unsigned long)osd_fb_crc(prev_disp));
+        prev_disp = rdp_disp;
+        prev_key = g_frame;
+    }
+#endif
     cur_disp = rdp_disp;
 
 	g_screen_ptr = rdp_disp->buffer;
 	g_screen_pitch = 320*2;
+#if defined(MVS64_FBCRC) || defined(MVS64_SNDOSD)
+	osd_disp = rdp_disp;
+#endif
 
     rdpq_attach(rdp_disp, NULL);
 	rdpq_set_scissor(0, 0, 320, 224);
 }
 
 void plat_endframe(void) {
+#ifdef MVS64_FBCRC
+	// Pixel-identity gate rig: drain the RDP, hash the finished frame, then
+	// show. FNV-1a over the visible 320x224 region, read uncached (the RDP
+	// wrote RDRAM behind the CPU cache). The drain and the ~35k uncached
+	// reads change emulation speed, so this rig is only meaningful in
+	// -DMVS64_DET_AUDIO builds (see there) and its fps means nothing.
+	rdpq_detach_wait();
+	// Keyed by GUEST frame, so a frameskip build's drawn frames compare 1:1
+	// against the same frames of a baseline.
+	extern int g_frame;
+	plat_log("[FBCRC] %lu %08lx\n", (unsigned long)g_frame,
+	         (unsigned long)osd_fb_crc(osd_disp));
+	display_show(osd_disp);
+#elif defined(MVS64_SNDOSD)
+	rdpq_detach_wait();
+	{
+		// Audio-health OSD: which layer of the sound pipeline died, readable
+		// on a real console with no cable (mirrors the [AIPUMP] telemetry).
+		//   F dd.d gg.g  drawn fps, then game-speed (emulated) fps over a
+		//             60-drawn-frame window; equal unless frameskip is on
+		//   D wamh n  offload dead-latches (whole-pump, adpcm, fm, hatch)
+		//             + death count
+		//   K k R r W w  rspq lost-wakeup watchdog kicks + offload revives
+		//             + rspq highpri-wedge recoveries (libdragon patch)
+		//   S s n     silent-governor engaged + ISR silence-pad frames/sec
+		//   L n C n   staging-ring lead (frames) + AI consumption frames/sec
+		// Healthy @11kHz: D 0000 0, K 0 R 0 W 0, S 0 0, L ~2n, C ~11025.
+		// Sound dead but C ~11025  -> delivery alive, generation muted/dead
+		// (look at D/S). C 0 -> the AI interrupt chain itself died.
+		extern int g_frame;
+		static uint32_t tick0, rd0, pad0;
+		static int accn, gf0;
+		static char l1[48], l2[24], l3[24], l4[24], l5[24];
+		if (accn == 0 && tick0 == 0) {   // bootstrap
+			tick0 = TICKS_READ(); rd0 = aring_rd; pad0 = aring_pad; gf0 = g_frame;
+		}
+		if (++accn >= 60) {
+			uint32_t now = TICKS_READ();
+			uint32_t dt = TICKS_DISTANCE(tick0, now);
+			uint32_t rd = aring_rd, pad = aring_pad;
+			if (dt) {
+				uint32_t f10  = (uint32_t)((uint64_t)TICKS_PER_SECOND * accn * 10 / dt);
+				uint32_t g10  = (uint32_t)((uint64_t)TICKS_PER_SECOND * (uint32_t)(g_frame - gf0) * 10 / dt);
+				uint32_t cons = (uint32_t)((uint64_t)(rd - rd0) * TICKS_PER_SECOND / dt);
+				uint32_t strv = (uint32_t)((uint64_t)(pad - pad0) * TICKS_PER_SECOND / dt);
+				uint32_t off  = YM2610_offload_flags();
+#ifdef MVS64_RSPWP
+				uint32_t kicks = rspwp_wedge_kicks;
+#else
+				uint32_t kicks = 0;
+#endif
+				sprintf(l1, "F %lu.%lu %lu.%lu", (unsigned long)(f10/10), (unsigned long)(f10%10),
+				        (unsigned long)(g10/10), (unsigned long)(g10%10));
+				sprintf(l2, "D %u%u%u%u %lu", (unsigned)!!(off & 2), (unsigned)!!(off & 1),
+				        (unsigned)!!(off & 4), (unsigned)!!(off & 16),
+				        (unsigned long)ym_off_deaths);
+				snprintf(l3, sizeof l3, "K %lu R %lu W %lu", (unsigned long)kicks,
+				        (unsigned long)ym_off_revives,
+				        (unsigned long)rspq_wedge_recoveries());
+				sprintf(l4, "S %d %lu", sound_silent ? 1 : 0, (unsigned long)strv);
+				sprintf(l5, "L %lu C %lu", (unsigned long)(aring_wr - aring_rd),
+				        (unsigned long)cons);
+			}
+			tick0 = now; rd0 = rd; pad0 = pad; accn = 0; gf0 = g_frame;
+		}
+		uint16_t *fb = (uint16_t *)UncachedAddr(osd_disp->buffer);
+		int stride_px = osd_disp->stride / 2;
+		osd_text(fb, stride_px, 8,  8, l1);
+		osd_text(fb, stride_px, 8, 22, l2);
+		osd_text(fb, stride_px, 8, 36, l3);
+		osd_text(fb, stride_px, 8, 50, l4);
+		osd_text(fb, stride_px, 8, 64, l5);
+	}
+	display_show(osd_disp);
+#elif defined(MVS64_PERFOSD)
+	perfosd_endframe();
 	plat_detach_show();
+#else
+	plat_detach_show();
+#endif
 }
