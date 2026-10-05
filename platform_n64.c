@@ -433,6 +433,9 @@ int plat_poll(void) {
     if (ckeys.c[0].C_down)  { keystate[PLAT_KEY_P1_C] = 1; }
     if (ckeys.c[0].C_right) { keystate[PLAT_KEY_P1_D] = 1; }
     if (ckeys.c[0].start)   { keystate[PLAT_KEY_P1_START] = 1; }
+    // Z inserts a coin/credit (the MVS has no coin without this); C-up = select.
+    if (ckeys.c[0].Z)       { keystate[PLAT_KEY_COIN_1] = 1; }
+    if (ckeys.c[0].C_up)    { keystate[PLAT_KEY_P1_SELECT] = 1; }
 
     return 1;
 }
