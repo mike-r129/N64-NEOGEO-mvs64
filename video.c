@@ -63,11 +63,20 @@ uint32_t perf_dr_miss;    /* sprite-cache misses (PI DMA loads, [PERF3]) */
 uint32_t perf_dr_missticks; /* ticks spent in the miss/DMA path */
 #define DRAW_PERF 1
 #endif
-#if defined(N64) && defined(MVS64_PERFCOUNT)
-// Coarse per-frame draw split (one TICKS pair per section, per walk and per
-// C-ROM miss), printed and zeroed in [PERF2]/[PERF3]. Drawn tiles by RDP
-// path (the ucode modal test, rsp_video.S): G = COPY mode (full 16x16, no
-// flip, no x-clip), H = would be COPY but flipped.
+#if defined(N64) && (defined(MVS64_PERFCOUNT) || defined(MVS64_PERFOSD))
+// Coarse per-frame draw split, cheap enough for the PERFOSD hardware overlay
+// (one TICKS pair per section, per walk and per C-ROM miss; the per-record
+// DRAW_PERF timers stay PERFCOUNT-only). PERFOSD consumes and zeroes these
+// in plat_perf_frame; PERFCOUNT prints and zeroes them in [PERF2]/[PERF3].
+// Inside the sprite pass, per drawn record: C-ROM lookup ticks (Q, incl.
+// misses), RSP command issue ticks (E, incl. flushes and buffer switches)
+// and the drawn-tile count (N); the walk itself is R minus Q and E.
+#ifndef MVS64_PERFCOUNT
+uint32_t perf_dr_begin, perf_dr_sprites, perf_dr_fix, perf_dr_missticks;
+uint32_t perf_dr_cache, perf_dr_rspq, perf_dr_tiles;
+#endif
+// Drawn tiles by RDP path (the ucode modal test, rsp_video.S): G = COPY
+// mode (full 16x16, no flip, no x-clip), H = would be COPY but flipped.
 uint32_t perf_dr_copyt, perf_dr_flipt;
 #define DRAW_PERF_COARSE 1
 #endif

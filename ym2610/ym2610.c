@@ -124,6 +124,14 @@
 #define PI 3.14159265358979323846
 #endif
 
+/* MVS64: -DMVS64_YMPROF (N64) synthesis cost split, filled in
+ * YM2610Update_stream, reported+reset by the sound module's [SNDRMS] print.
+ * 0=sched(LFO+EG timer) 1=FM(EG replay+chan_calc) 2=SSG 3=ADPCM 4=mix+output. */
+#if defined(MVS64_YMPROF) && defined(N64)
+#include <libdragon.h>
+uint32_t ym_prof[5];
+#endif
+
 
 /* select timer system internal or external */
 #define FM_INTERNAL_TIMER 0
@@ -3108,6 +3116,16 @@ INLINE s32 OPNB_ADPCMB_CALC(ADPCMB *adpcmb) {
  * gate is ZERO mismatches over a long ares run).
  * ==========================================================================*/
 
+/* Wait-stall telemetry for the RSP offloads (MVS64_RSPWAITPROF builds):
+ * cumulative ticks blocked on each seq poll + worst single wait, printed as
+ * [RSPWAIT] every 128 whole-pump calls (YM2610_wp_finish_async) — so a stall
+ * source is measured, not guessed. WP_OFF=1 builds accumulate but never
+ * print. */
+#if defined(N64) && defined(MVS64_RSPWAITPROF)
+#define RSPWAIT_PROF 1
+static u32 rspwait_fm, rspwait_fm_max, rspwait_adpcm, rspwait_adpcm_max;
+#endif
+
 #if defined(N64) && defined(MVS64_RSPADPCM)
 #include <libdragon.h>
 #include <stddef.h>
@@ -4332,6 +4350,11 @@ static int rspwp_collect(int block) {
 		}
 #endif
 	}
+#if defined(MVS64_YMPROF) && defined(N64)
+	{
+		extern uint32_t ym_prof[5];
+		uint32_t _ct0 = TICKS_READ();
+#endif
 	if (pd->a_on) {
 		/* fold the deferred ADPCM contribution into the banked partial */
 		const rspa_out_t * const ao = &rspa_obs[slot];
@@ -4347,6 +4370,10 @@ static int rspwp_collect(int block) {
 		Limit(rt, MAXOUT, MINOUT);
 		((u32 *) pd->dest)[i] = ((u32) (u16) lt << 16) | (u16) (s16) rt;
 	}
+#if defined(MVS64_YMPROF) && defined(N64)
+		ym_prof[4] += TICKS_DISTANCE(_ct0, TICKS_READ());
+	}
+#endif
 #ifdef MVS64_RSPWP_VERIFY
 	rspwp_chunks++;
 	rspwp_verify_cmp(pd, ob);
@@ -4956,8 +4983,13 @@ void YM2610Update_stream(int length) {
 /* MVS64: profiling hooks around the synthesis passes (no-ops unless a
  * profiling build defines them). 0=sched(LFO+EG timer) 1=FM(EG replay
  * + chan_calc) 2=SSG 3=ADPCM 4=mix+copy. */
+#if defined(MVS64_YMPROF) && defined(N64)
+#define YMPROF_T(x)   uint32_t _yp##x = TICKS_READ()
+#define YMPROF_A(n,x) (ym_prof[n] += TICKS_DISTANCE(_yp##x, TICKS_READ()))
+#else
 #define YMPROF_T(x)   ((void)0)
 #define YMPROF_A(n,x) ((void)0)
+#endif
 
 	/* MVS64: channel-major "batch" synthesis. The classic loop was sample-major
 	 * (per sample: EG for all channels, chan_calc for all channels, SSG, ADPCM,
@@ -5463,3 +5495,40 @@ void YM2610Update_stream(int length) {
 }
 #undef YMPROF_T
 #undef YMPROF_A
+
+#if defined(MVS64_SNDHEALTH) || defined(MVS64_SNDOSD)
+#include <stdio.h>
+// MVS64 diagnostic: one-line snapshot of every state element that can hold a
+// sustained tone, printed by sound_neogeo.c's [SNDRMS] telemetry (~1/s). Used
+// to identify WHICH voice is latched during the "stuck boot beep" bug:
+//   en       = SSG enable reg 0x07 (ACTIVE-LOW: bit clear = tone/noise ON)
+//   v        = SSG volume regs 0x08-0x0A (bit4 = envelope mode)
+//   p        = SSG tone periods (pitch of a stuck square wave)
+//   fmkey    = FM key-on bits (ch*4+slot); a bit held for many seconds = stuck
+//   fmhot    = FM slots NOT in EG_OFF whose vol_out is audible (<512)
+//   offhot   = FM slots parked in EG_OFF whose vol_out is still audible —
+//              nonzero means the EG_OFF-skip optimization left stale volume
+//   ab       = ADPCM-B port state (bit7 busy; looping sample = stuck sound)
+int ym2610_dbg_state(char *o, int n) {
+	unsigned fmkey = 0, fmhot = 0, offhot = 0;
+	for (int c = 0; c < 6; c++)
+		for (int s = 0; s < 4; s++) {
+			const FM_SLOT *sl = &YM2610.CH[c].SLOT[s];
+			if (sl->key) fmkey |= 1u << (c * 4 + s);
+			if (sl->vol_out < 512) {
+				if (sl->state != EG_OFF) fmhot |= 1u << (c * 4 + s);
+				else                     offhot |= 1u << (c * 4 + s);
+			}
+		}
+	unsigned aa = 0;
+	for (int c = 0; c < 6; c++)
+		if (YM2610.adpcma[c].flag) aa |= 1u << c;
+	return snprintf(o, n,
+		"en=%02x v=%02x,%02x,%02x p=%03x,%03x,%03x fmkey=%06x fmhot=%06x offhot=%06x aa=%02x ab=%02x",
+		YM2610.regs[0x07], YM2610.regs[0x08], YM2610.regs[0x09], YM2610.regs[0x0A],
+		((YM2610.regs[1] & 0xf) << 8) | YM2610.regs[0],
+		((YM2610.regs[3] & 0xf) << 8) | YM2610.regs[2],
+		((YM2610.regs[5] & 0xf) << 8) | YM2610.regs[4],
+		fmkey, fmhot, offhot, aa, YM2610.adpcmb.portstate);
+}
+#endif
