@@ -59,7 +59,9 @@ void cpu_start_trace(int cnt) {
 	cpu_trace_count = cnt;
 }
 
-static int g_frame;
+// Guest frame counter. Non-static: the diagnostics key on guest frames
+// (N64_FRAME is the host VI count and skews with wall speed).
+int g_frame;
 
 #ifndef N64
 // --- Headless scripted input ---------------------------------------------
@@ -187,6 +189,16 @@ uint32_t profile_hw_io;
 uint32_t profile_dma_load;
 uint32_t profile_m68k;   // ticks inside the 68k core this frame (incl. MMIO)
 uint32_t profile_snd;    // ticks synthesizing audio (Z80+YM2610) this frame
+#ifdef MVS64_PERFCOUNT
+// Draw-bucket split (see emu_render): framebuffer-wait vs command issue vs
+// detach. Diagnostic builds only.
+uint32_t perf_draw_wait, perf_draw_issue, perf_draw_end;
+#endif
+#ifdef MVS64_PERFCOUNT
+// m64k_run entries this frame: sizes the per-slice constant cost (icache
+// re-entry, register save/restore) vs the per-instruction marginal cost.
+uint32_t perf_m68k_slices;
+#endif
 
 static uint64_t m68k_exec(uint64_t clock) {
 	clock /= M68K_CLOCK_DIV;
@@ -194,6 +206,9 @@ static uint64_t m68k_exec(uint64_t clock) {
 		#ifdef USE_M64K
 		#ifdef N64
 		uint32_t t0 = TICKS_READ();
+		#ifdef MVS64_PERFCOUNT
+		perf_m68k_slices++;
+		#endif
 		m68k_clock = m64k_run(&m64k, clock);
 		profile_m68k += TICKS_DISTANCE(t0, TICKS_READ());
 		#else
@@ -352,9 +367,23 @@ uint32_t emu_render(void *arg) {
 	#ifdef N64
 	uint32_t t0 = TICKS_READ();
 	#endif
+	#if defined(N64) && defined(MVS64_PERFCOUNT)
+	// Split the draw bucket: display_get/attach wait vs command issue vs
+	// detach — tells whether draw% is CPU work or RSP/RDP back-pressure.
+	extern uint32_t perf_draw_wait, perf_draw_issue, perf_draw_end;
+	plat_beginframe();
+	perf_draw_wait = TICKS_DISTANCE(t0, TICKS_READ());
+	uint32_t t1 = TICKS_READ();
+	video_render();
+	perf_draw_issue = TICKS_DISTANCE(t1, TICKS_READ());
+	uint32_t t2 = TICKS_READ();
+	plat_endframe();
+	perf_draw_end = TICKS_DISTANCE(t2, TICKS_READ());
+	#else
 	plat_beginframe();
 	video_render();
 	plat_endframe();
+	#endif
 
 	rom_next_frame();
 
@@ -560,19 +589,8 @@ int main(int argc, char *argv[]) {
 			#else
 			(uint32_t)m68k_get_reg(NULL, M68K_REG_PC));
 			#endif
-		#if defined(MVS64_IDLEPROBE) && defined(USE_M64K)
-		{
-			// Idle-loop discovery (EXTRA_DEFINES=-DMVS64_IDLEPROBE): a branch
-			// target the interpreter hit 4000 times in a row is a wait loop
-			// candidate for the game's idle_skip list (check it disassembles
-			// to a pure poll before adding it).
-			extern uint32_t idle_probe_found;
-			if (idle_probe_found) {
-				debugf("[IDLEPROBE] long spin at 68k pc=%06lx\n",
-					(unsigned long)(idle_probe_found & 0xFFFFFF));
-				idle_probe_found = 0;
-			}
-		}
+		#ifdef EMU_DIAG
+		emu_diag_frame();
 		#endif
 		#endif
 

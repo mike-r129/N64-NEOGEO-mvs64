@@ -77,6 +77,15 @@ pc_diff:      .long 0
 m64k_idle_pagemask: .long 0
     .globl m64k_idle_pcs
 m64k_idle_pcs:      .space 4*(M64K_IDLE_MAX+1)
+#ifdef MVS64_PERFCOUNT
+# Per-frame diagnostic counters (read+reset by emu_diag.c's [PERF] print):
+# executed 68k instructions and idle-skip fires. Diagnostic builds only —
+# the dispatch loop increment costs ~3 insns/instruction.
+    .globl perf_m68k_insns
+perf_m68k_insns: .long 0
+    .globl perf_idle_skips
+perf_idle_skips: .long 0
+#endif
 #ifdef M64K_BLOCKOPS
 # 1 when the PB-ROM bank window [0x200000,0x300000) is linearly TLB-mapped
 # (set by hw_init), so the long copy may read from it; 0 in cache mode.
@@ -398,6 +407,11 @@ opshiftsmem:
     .set noreorder
     blez m_cycles, main_loop_exit
      lhu opcode, 0(m_pc)
+#ifdef MVS64_PERFCOUNT
+    lw t1, perf_m68k_insns
+    addiu t1, 1
+    sw t1, perf_m68k_insns
+#endif
     #if M64K_CONFIG_ADDRERR
     sw opcode, M64K_OFF_IR(ctx)
     #endif
@@ -3391,6 +3405,11 @@ jmp_exec:
      nop
     .set reorder
 idle_skip:
+#ifdef MVS64_PERFCOUNT
+    lw t0, perf_idle_skips
+    addiu t0, 1
+    sw t0, perf_idle_skips
+#endif
     li m_cycles, 0
     j main_loop
 

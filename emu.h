@@ -65,4 +65,10 @@ uint32_t emu_pc(void);
 void emu_cpu_reset(void);
 void emu_cpu_irq(int level, bool state);
 
+// Per-frame diagnostic telemetry (emu_diag.c), instrumented N64 builds only.
+#if defined(N64) && (defined(MVS64_PERFCOUNT) || defined(MVS64_IDLEPROBE))
+#define EMU_DIAG 1
+void emu_diag_frame(void);
+#endif
+
 #endif

@@ -48,16 +48,59 @@ static uint16_t color_convert(uint16_t val) {
 
 static uint16_t PALETTE_RAM_EMU[4*1024];
 
+#if defined(N64) && defined(MVS64_PERFCOUNT)
+// Fine draw split (diagnostic builds): where does the draw bucket go?
+// Ticks: render_begin / sprite walk / fix layer, and inside the sprite walk
+// the sprite-cache lookups vs the rspq command issue. Counts: tiles, fix
+// cells. Printed as [PERF2] in emu_diag.c, reset per frame.
+uint32_t perf_dr_begin, perf_dr_sprites, perf_dr_fix;
+uint32_t perf_dr_cache, perf_dr_rspq;
+uint32_t perf_dr_tiles, perf_dr_cells;
+uint32_t perf_dr_empty;   /* sprite tiles skipped as known-empty */
+uint32_t perf_walk_spr;   /* sprites that reach the tile loop (past all culls) */
+uint32_t perf_walk_iter;  /* tile-loop iterations, visible or not */
+uint32_t perf_dr_miss;    /* sprite-cache misses (PI DMA loads, [PERF3]) */
+uint32_t perf_dr_missticks; /* ticks spent in the miss/DMA path */
+#define DRAW_PERF 1
+#endif
+#if defined(N64) && defined(MVS64_PERFCOUNT)
+// Coarse per-frame draw split (one TICKS pair per section, per walk and per
+// C-ROM miss), printed and zeroed in [PERF2]/[PERF3]. Drawn tiles by RDP
+// path (the ucode modal test, rsp_video.S): G = COPY mode (full 16x16, no
+// flip, no x-clip), H = would be COPY but flipped.
+uint32_t perf_dr_copyt, perf_dr_flipt;
+#define DRAW_PERF_COARSE 1
+#endif
 
 // Draw-path timers and counters; all compile to nothing in a release build.
 //   DPERF_T0(t) / DPERF_ADD(acc, t): start a TICKS timer, add its elapsed
 //   ticks to acc (DRAW_PERF_COARSE: profiling builds).
 //   DPERF_INC(c): per-record counter (DRAW_PERF: PERFCOUNT builds only).
 //   dperf_tile(w0, w1): count a drawn tile, split by RDP path (G/H).
+#ifdef DRAW_PERF_COARSE
+#define DPERF_T0(t)        uint32_t t = TICKS_READ()
+#define DPERF_ADD(acc, t)  ((acc) += TICKS_DISTANCE(t, TICKS_READ()))
+// (same predicate as the ucode's modal test, cmd_sprite_draw)
+#define dperf_tile(w0, w1) do { \
+	perf_dr_tiles++; \
+	int _x = ((int32_t)((w1) << 20)) >> 20, _y = ((int32_t)((w1) << 8)) >> 20; \
+	if (_x >= 512-16) _x -= 512; \
+	if (_y >= 512-16) _y -= 512; \
+	if (((w1) >> 24) == 0xFF && _x >= 0 && _x <= 304 && _y >= -15 && _y <= 223) { \
+		if ((w0) & (3u << 28)) perf_dr_flipt++; \
+		else perf_dr_copyt++; \
+	} \
+} while (0)
+#else
 #define DPERF_T0(t)        ((void)0)
 #define DPERF_ADD(acc, t)  ((void)0)
 #define dperf_tile(w0, w1) ((void)0)
+#endif
+#ifdef DRAW_PERF
+#define DPERF_INC(c)       ((c)++)
+#else
 #define DPERF_INC(c)       ((void)0)
+#endif
 
 // --- sprite walk -------------------------------------------------------------
 // The SCB walk turns each visible tile into a record and draws it on the
@@ -321,10 +364,24 @@ static void render_sprites(void) {
 }
 
 void video_render(void) {
+#ifdef DRAW_PERF_COARSE
+	uint32_t t0 = TICKS_READ();
+	render_begin();
+	uint32_t t1 = TICKS_READ();
+	render_sprites();
+	uint32_t t2 = TICKS_READ();
+	render_fix();
+	render_end();
+	uint32_t t3 = TICKS_READ();
+	perf_dr_begin   += TICKS_DISTANCE(t0, t1);
+	perf_dr_sprites += TICKS_DISTANCE(t1, t2);
+	perf_dr_fix     += TICKS_DISTANCE(t2, t3);
+#else
 	render_begin();
 	render_sprites();
 	render_fix();
 	render_end();
+#endif
 }
 
 // Set on every palette write / bank switch; consumed by the N64 render_begin
