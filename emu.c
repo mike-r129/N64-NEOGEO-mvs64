@@ -296,27 +296,45 @@ uint32_t emu_vblank_start(void* arg) {
 
 uint32_t render_time;
 
+#ifdef N64
+// Auto frameskip (make ... FRAMESKIP=n, i.e. -DMVS64_FRAMESKIP=n; 0 = off).
+// When emulation is behind the VI clock (N64_FRAME counts VIs, g_frame
+// guest frames), skip DRAWING up to n frames in a row so the game logic
+// keeps full speed instead of running in slow motion. The 68k, Z80 and
+// audio run every frame either way; only the draw is dropped. After n
+// skips the next frame always draws, and if it is still behind, the lag
+// is forgiven (N64_FRAME resynced): there is never a catch-up sprint after
+// a heavy scene. n=1 keeps the display at >= half the emulated rate.
+#ifndef MVS64_FRAMESKIP
+#define MVS64_FRAMESKIP 0
+#endif
+#if MVS64_FRAMESKIP > 0
+static uint32_t fskip_drawn, fskip_skipped;   // per-window counters ([FSKIP])
+#endif
+#endif
+
 uint32_t emu_render(void *arg) {
 
-	#ifdef N64
-	if (CONFIG_FRAMESKIP_MODE == 2) {
+	#if defined(N64) && MVS64_FRAMESKIP > 0
+	{
 		extern volatile int N64_FRAME;
-		const int MAX_SKIP = 4;
-		static int skip = 0;
+		static int skip_run = 0;
 
 		if (N64_FRAME > g_frame) {
-			skip++;
-			if (skip < MAX_SKIP) {
-				debugf("[RENDER] skip frame\n");
+			if (skip_run < MVS64_FRAMESKIP) {
+				skip_run++;
+				fskip_skipped++;
+				render_time = 0;
 				plat_audio_pump();   // audio pumps once per frame regardless
 				return FRAME_CLOCK;
 			}
-			debugf("[RENDER] max skip\n");
-			skip = 0;
+			// Drawing this one after a full skip run: forgive the lag.
 			disable_interrupts();
 			N64_FRAME = g_frame;
 			enable_interrupts();
 		}
+		skip_run = 0;
+		fskip_drawn++;
 	}
 	#endif
 
@@ -565,6 +583,20 @@ int main(int argc, char *argv[]) {
 			fps_frame = g_frame;
 			fps_time = curtime;
 		}
+		#if MVS64_FRAMESKIP > 0
+		// Guest-frame-keyed speed window: scripted input is frame-counted, so
+		// window k covers the same game content in every build. Emulated
+		// fps = 300000 / ms; displayed fps = drawn * 1000 / ms.
+		if ((g_frame % 300) == 0) {
+			static uint32_t fsk_t0;
+			if (fsk_t0)
+				debugf("[FSKIP] f=%d ms=%lu drawn=%lu skipped=%lu\n", g_frame,
+					(unsigned long)(TICKS_DISTANCE(fsk_t0, curtime) / (TICKS_PER_SECOND / 1000)),
+					(unsigned long)fskip_drawn, (unsigned long)fskip_skipped);
+			fsk_t0 = curtime;
+			fskip_drawn = fskip_skipped = 0;
+		}
+		#endif
 		#endif
 	}
 

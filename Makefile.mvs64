@@ -81,6 +81,13 @@ ifndef WP_OFF
 CFLAGS += -DMVS64_RSPFM -DMVS64_RSPWP
 endif
 
+ifdef FRAMESKIP
+# Auto frameskip: skip drawing up to $(FRAMESKIP) frames in a row when the
+# emulation is behind the VI clock, so game speed holds (emu_render, emu.c).
+# Default off (0): the game slows down instead.
+CFLAGS += -DMVS64_FRAMESKIP=$(FRAMESKIP)
+endif
+
 # NOTE: the audio TUs (ym2610.c/z80.c/sound_neogeo.c) stay at -O2, measured
 # both ways on N64: -O3 made in-game sound time ~40% worse (the inline/unroll
 # bloat thrashes the VR4300 16KB icache in the synthesis loop), and -Os was
