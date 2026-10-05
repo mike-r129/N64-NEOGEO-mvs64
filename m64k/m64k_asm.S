@@ -51,9 +51,10 @@
 # Pin this object's .sdata (context + dispatch tables, per-instruction hot)
 # to fixed dcache sets: 8KB-aligned, then offset to set 140. Otherwise it
 # moves with every .data change before it (e.g. instrumented vs release
-# builds put it on different sets). Set 140..194 overlaps only the tail of
-# the Z80 work RAM in z80_hot, which z80_anchor.c pins at 0x1CF0; this
-# pairing measured fast. Costs < 10KB of .sdata padding.
+# builds put it on different sets). Set 140..194 overlaps only the end of
+# the Z80 read page map and the first ~0x2D8 bytes of the Z80 work RAM in
+# z80_hot, which z80_anchor.c pins at page offset 0xF0; this pairing
+# measured fast. Costs < 10KB of .sdata padding.
     .balign 8192
     .space M64K_SDATA_SETOFS
 # The CPU context (m64k_t; emu.c/testsuite.c only declare it). It is read

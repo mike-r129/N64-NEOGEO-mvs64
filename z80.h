@@ -30,12 +30,31 @@ struct z80 {
   // FLAG_* in z80.c
   uint8_t f;
 
-  uint8_t iff_delay;
   uint8_t interrupt_mode;
   uint8_t int_data;
-  bool iff1 : 1, iff2 : 1;
-  bool halted : 1;
-  bool int_pending : 1, nmi_pending : 1;
+  bool iff1, iff2;
+  // Everything that can make z80_run leave its fast path, in one aligned
+  // word: an EI delay, a pending INT or NMI, the level IRQ input (see
+  // irq_line below) and HALT. `ev_mask` has 0xFF in the lanes that matter
+  // right now: INT and the IRQ line only while IFF1 is set (the core keeps
+  // it in sync; z80_run also rebuilds it on entry). While events & ev_mask
+  // is 0 no interrupt logic can apply, so z80_run tests one word per
+  // instruction instead of the full predicates.
+  union {
+    uint64_t events;
+    struct {
+      uint8_t iff_delay;
+      bool int_pending, nmi_pending;
+      uint8_t irq_line;
+      bool halted;
+    };
+  };
+  union {
+    uint64_t ev_mask;
+    struct {
+      uint8_t evm_iff_delay, evm_int, evm_nmi, evm_line, evm_halted;
+    };
+  };
   // MVS64 read page map: byte at addr = *(uint8_t*)(rmap[addr >> 8] + addr).
   // Entries are host pointers pre-biased by the page's Z80 base address, so
   // every memory READ (opcode/operand fetch, data) is a branchless inline
@@ -47,11 +66,12 @@ struct z80 {
   // MVS64 batch-run support (z80_run). The owner's write/port callbacks set
   // `wrote`; z80_run clears it before each instruction, so after a run it
   // tells whether the LAST instruction wrote, and `wrote_any` whether any
-  // instruction of the run did. `irq_line` is a level-triggered IRQ input:
-  // while it is nonzero, z80_run re-asserts the maskable interrupt (with the
-  // last int_data) before any instruction where IFF1 is set and none is
-  // pending; `irq_redeliver` counts those re-assertions.
-  uint8_t wrote, wrote_any, irq_line;
+  // instruction of the run did. `irq_line` (in `events` above) is a
+  // level-triggered IRQ input: while it is nonzero, z80_run re-asserts the
+  // maskable interrupt (with the last int_data) before any instruction where
+  // IFF1 is set and none is pending; `irq_redeliver` counts those
+  // re-assertions.
+  uint8_t wrote, wrote_any;
   unsigned long irq_redeliver;
 };
 

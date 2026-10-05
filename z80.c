@@ -169,6 +169,12 @@ static inline void set_f(z80* const z, uint8_t val) {
   z->f = val;
 }
 
+// IFF1 also gates the INT and IRQ-line lanes of z80_run's event test.
+static inline void set_iff1(z80* const z, bool v) {
+  z->iff1 = v;
+  z->evm_int = z->evm_line = v ? 0xFF : 0;
+}
+
 // increments R, keeping the highest byte intact
 static inline void inc_r(z80* const z) {
   z->r = (z->r & 0x80) | ((z->r + 1) & 0x7f);
@@ -194,6 +200,8 @@ static inline bool parity(uint8_t val) {
 }
 
 static void exec_opcode(z80* const z, uint8_t opcode);
+static inline __attribute__((always_inline))
+void exec_main(z80* const z, uint8_t opcode);
 static void exec_opcode_cb(z80* const z, uint8_t opcode);
 static void exec_opcode_dcb(
     z80* const z, const uint8_t opcode, const uint16_t addr);
@@ -602,7 +610,7 @@ static inline void process_interrupts(z80* const z) {
   if (z->iff_delay > 0) {
     z->iff_delay -= 1;
     if (z->iff_delay == 0) {
-      z->iff1 = 1;
+      set_iff1(z, 1);
       z->iff2 = 1;
     }
     return;
@@ -611,7 +619,7 @@ static inline void process_interrupts(z80* const z) {
   if (z->nmi_pending) {
     z->nmi_pending = 0;
     z->halted = 0;
-    z->iff1 = 0;
+    set_iff1(z, 0);
     inc_r(z);
 
     z->cyc += 11;
@@ -622,7 +630,7 @@ static inline void process_interrupts(z80* const z) {
   if (z->int_pending && z->iff1) {
     z->int_pending = 0;
     z->halted = 0;
-    z->iff1 = 0;
+    set_iff1(z, 0);
     z->iff2 = 0;
     inc_r(z);
 
@@ -708,7 +716,9 @@ void z80_init(z80* const z) {
 
   z->iff_delay = 0;
   z->interrupt_mode = 0;
-  z->iff1 = 0;
+  z->events = 0;
+  z->ev_mask = 0;
+  set_iff1(z, 0);
   z->iff2 = 0;
   z->halted = 0;
   z->int_pending = 0;
@@ -776,28 +786,52 @@ unsigned z80_run(z80* const z, unsigned long until, uint16_t* last_pc) {
   unsigned n = 0;
   uint8_t any = 0;
   uint16_t pc0;
-  do {
-    if (z->irq_line && z->iff1 && !z->int_pending) {
-      z80_gen_int(z, z->int_data);
-      z->irq_redeliver++;
-    }
+  // The owner may have changed IFF1 or the event bytes directly since the
+  // last run: rebuild the mask (constant lanes, then IFF1's).
+  z->ev_mask = 0;
+  z->evm_iff_delay = z->evm_nmi = z->evm_halted = 0xFF;
+  set_iff1(z, z->iff1);
+  for (;;) {
+    uint8_t opcode = 0x00;               // HALT executes NOPs in place
     pc0 = z->pc;
     z->wrote = 0;
-#ifdef MVS64_Z80OPHIST
-    z80_step(z);
-#else
-    uint8_t opcode = 0x00;               // HALT executes NOPs in place
-    if (!z->halted) {
-      opcode = *(const uint8_t*)(z->rmap[z->pc >> 8] + z->pc);
+    if (__builtin_expect((z->events & z->ev_mask) != 0, 0)) {
+      // Level IRQ re-assertion, exactly as before each z80_step.
+      if (z->irq_line && z->iff1 && !z->int_pending) {
+        z80_gen_int(z, z->int_data);
+        z->irq_redeliver++;
+      }
+      if (!z->halted) {
+        opcode = rb(z, z->pc);
+        z->pc++;
+      }
+    } else {
+      opcode = rb(z, z->pc);
       z->pc++;
     }
-    exec_opcode(z, opcode);
-    if (z->iff_delay | (uint8_t)(z->nmi_pending | (z->int_pending & z->iff1)))
-      process_interrupts_cold(z);   // out of line: keeps the loop small
-#endif
+#ifdef MVS64_Z80OPHIST
+    z->pc = pc0;
+    z80_step(z);
     any |= z->wrote;
     n++;
-  } while ((long)(until - z->cyc) > 0 && z->pc > pc0 && !z->halted);
+    if (z->halted) break;
+#else
+    exec_main(z, opcode);
+    if (__builtin_expect((z->events & z->ev_mask) != 0, 0)) {
+      // z80_step's interrupt predicate.
+      if (z->iff_delay | (uint8_t)(z->nmi_pending | (z->int_pending & z->iff1)))
+        process_interrupts_cold(z);   // out of line: keeps the loop small
+      if (z->halted) {
+        any |= z->wrote;
+        n++;
+        break;
+      }
+    }
+    any |= z->wrote;
+    n++;
+#endif
+    if (!((long)(until - z->cyc) > 0 && z->pc > pc0)) break;
+  }
   z->wrote_any = any;
   *last_pc = pc0;
   return n;
@@ -834,7 +868,11 @@ void z80_gen_int(z80* const z, uint8_t data) {
 // here, for every opcode.
 static void exec_opcode_slow(z80* const z, uint8_t opcode);
 
-static void exec_opcode(z80* const z, uint8_t opcode) {
+// Inlined once into z80_run's loop (the hot path) and once into exec_opcode
+// below (z80_step, IM0, DD/FD fallthrough), so the run loop dispatches
+// without a call.
+static inline __attribute__((always_inline))
+void exec_main(z80* const z, uint8_t opcode) {
   z->cyc += cyc_00[opcode];
   inc_r(z);
 
@@ -951,7 +989,7 @@ static void exec_opcode(z80* const z, uint8_t opcode) {
   case 0x39: addhl(z, z->sp); break; // add hl,sp
 
   case 0xF3:
-    z->iff1 = 0;
+    set_iff1(z, 0);
     z->iff2 = 0;
     break; // di
   case 0xFB: z->iff_delay = 1; break; // ei
@@ -1163,6 +1201,11 @@ static void exec_opcode(z80* const z, uint8_t opcode) {
 
   default: exec_opcode_slow(z, opcode); return;
   }
+}
+
+__attribute__((noinline))
+static void exec_opcode(z80* const z, uint8_t opcode) {
+  exec_main(z, opcode);
 }
 
 // exec_opcode's callout cases (the cycle/R prologue already ran there).
@@ -1602,7 +1645,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
   case 0x6D:
   case 0x75:
   case 0x7D:
-    z->iff1 = z->iff2;
+    set_iff1(z, z->iff2);
     ret(z);
     break; // retn
   case 0x4D: ret(z); break; // reti
