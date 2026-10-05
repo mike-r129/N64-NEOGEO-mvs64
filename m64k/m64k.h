@@ -215,6 +215,21 @@ void m64k_set_mmio_handlers(m64k_t *m64k,
 void m64k_run_stop(m64k_t *m64k);
 
 /**
+ * @brief Register idle-loop heads for the idle skip.
+ *
+ * Each PC is the target of the backward branch of a side-effect-free wait
+ * loop (typically "loop: tst.b flag; beq loop", waiting for a flag set by an
+ * interrupt). When the interpreter branches back to one of them, it ends the
+ * current timeslice, fast-forwarding the wait to the next scheduled event.
+ * Only register loops that do nothing but poll: anything else changes
+ * behavior. Replaces the previous list; at most M64K_IDLE_MAX (8) entries
+ * are used, and zero entries are ignored.
+ *
+ * @return the number of PCs registered
+ */
+int m64k_set_idle_pcs(const uint32_t *pcs, int n);
+
+/**
  * @brief Get the current PC.
  *
  * This function can be called to obtain the current PC. Notice that

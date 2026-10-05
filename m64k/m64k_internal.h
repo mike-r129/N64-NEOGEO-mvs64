@@ -28,6 +28,8 @@
 #define M64K_OFF_FORCED_REMAINING  (M64K_OFF_SLICE_BREAK + 1 * 1)
 // sizeof(m64k_t): the context is allocated in m64k_asm.S (see there).
 #define M64K_CTX_SIZE         144
+// Capacity of the jmp_exec idle-skip table (m64k_set_idle_pcs).
+#define M64K_IDLE_MAX         8
 
 #ifndef __ASSEMBLER__
 #include "m64k.h"

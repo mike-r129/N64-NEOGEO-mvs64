@@ -253,6 +253,27 @@ void m64k_run_stop(m64k_t *m64k)
     m64k->slice_break = 1;
 }
 
+// Idle-skip table, read by jmp_exec in m64k_asm.S: mapped PCs ended by 0,
+// plus a prefilter mask with bit (31-p) set for each 2KB page p that holds
+// one of them (p = (mapped_pc >> 11) & 31).
+extern uint32_t m64k_idle_pagemask;
+extern uint32_t m64k_idle_pcs[M64K_IDLE_MAX + 1];
+
+int m64k_set_idle_pcs(const uint32_t *pcs, int n)
+{
+    uint32_t mask = 0;
+    int k = 0;
+    for (int i = 0; i < n && k < M64K_IDLE_MAX; i++) {
+        if (!pcs[i]) continue;
+        uint32_t m = (uint32_t)M64K_CONFIG_MEMORY_BASE | (pcs[i] & 0xFFFFFF);
+        m64k_idle_pcs[k++] = m;
+        mask |= 0x80000000u >> ((m >> 11) & 31);
+    }
+    m64k_idle_pcs[k] = 0;
+    m64k_idle_pagemask = mask;
+    return k;
+}
+
 void m64k_set_hook_irqack(m64k_t *m64k, int (*hook)(void *ctx, int level), void *ctx)
 {
     m64k->hook_irqack = hook;

@@ -56,6 +56,25 @@
     .balign 16
 m64k:         .space M64K_CTX_SIZE
 pc_diff:      .long 0
+# jmp_exec idle-skip table, filled by m64k_set_idle_pcs(): the mapped PCs
+# (0xFFxxxxxx, which lw sign-extends exactly like map_m68k builds m_pc) of
+# side-effect-free wait loops, ended by a 0 word, and a prefilter mask with
+# bit (31-p) set for every 2KB page p = (pc>>11)&31 that holds one of them.
+# Empty by default: nothing is skipped.
+    .globl m64k_idle_pagemask
+m64k_idle_pagemask: .long 0
+    .globl m64k_idle_pcs
+m64k_idle_pcs:      .space 4*(M64K_IDLE_MAX+1)
+#ifdef MVS64_IDLEPROBE
+# Idle-spin probe: detects a branch/jump target hit many times CONSECUTIVELY
+# (a true wait-for-IRQ spin) vs a bounded backward loop (memcpy/DBRA). The PC
+# that spins past the threshold is recorded in idle_probe_found for the C side
+# to print. Gated by -DMVS64_IDLEPROBE; zero cost in normal builds.
+idle_probe_last:  .long 0
+idle_probe_cnt:   .long 0
+     .globl idle_probe_found
+idle_probe_found: .long 0
+#endif
 
 optable:
     .long   op_tbl0,  op_moveb, op_movel, op_movew, op_tbl4,  op_addq,  op_bcc,   op_moveq
@@ -2597,18 +2616,47 @@ jmp_exec:
     subu t0, eaptr32, m_pc             # save new pc_diff
     sw t0, pc_diff
     check_addr_error eaptr32, pc_address_error
-    # The constants MUST be materialized with lui (sign-extending) so their
-    # 64-bit register value matches the map_m68k result: mmap_mask is loaded
-    # with lui, so m_pc is the SIGN-extended 0xFFFFFFFF_FFxxxxxx. Writing
-    # "beq m_pc, 0xFF001FE2" makes GAS emit a ZERO-extended li+dsll+ori
-    # (0x00000000_FF001FE2), and the 64-bit beq can then never be equal.
-    lui t0, 0xFF00
-    ori t1, t0, 0x1FE2
-    beq m_pc, t1, idle_skip           # mslug
-    lui t1, 0xFFC1
-    ori t1, 0x8714
-    beq m_pc, t1, idle_skip           # Universe BIOS vblank wait
-    j main_loop
+#ifdef MVS64_IDLEPROBE
+    lw t0, idle_probe_last
+    beq t0, m_pc, 1f                   # same branch target as last time?
+    sw m_pc, idle_probe_last           # no: new target, reset run length
+    sw zero, idle_probe_cnt
+    j 2f
+1:  lw t0, idle_probe_cnt
+    addiu t0, 1
+    sw t0, idle_probe_cnt
+    li t1, 4000                        # 4000 consecutive = a real wait-for-IRQ spin
+    bne t0, t1, 2f                     #   (a bounded DBRA/memcpy loop never reaches this)
+    sw m_pc, idle_probe_found          # record the spinning PC for the C side to print
+2:
+#endif
+    # Idle skip. Games wait for vblank in loops like "<here>: tst.b flag;
+    # beq <here>": pure side-effect-free polls of a flag the VBlank IRQ sets.
+    # Branching back into a registered loop head (m64k_set_idle_pcs: per
+    # game from game.ini, plus the BIOS's own waits) ends the timeslice,
+    # which fast-forwards the dead wait to the next scheduled event.
+    #
+    # The table holds the mapped PCs as 32-bit words; lw sign-extends them
+    # exactly like map_m68k builds m_pc (mmap_mask is loaded with lui, so
+    # m_pc is 0xFFFFFFFF_FFxxxxxx), so the 64-bit compare can match.
+    #
+    # Prefilter (m64k_idle_pagemask): one shift tests the target's 2KB page
+    # against the pages that hold a table PC; every other target (nearly
+    # all of the ~2k transfers per busy frame) skips the table walk. sllv
+    # uses only the low 5 bits of t0 = (pc>>11)&31, moving mask bit (31-p)
+    # to bit 31; the result is sign-extended, so bgez is "page not listed".
+    .set noreorder
+    lw t1, m64k_idle_pagemask
+    srl t0, m_pc, 11
+    sllv t1, t1, t0
+    bgez t1, main_loop
+     addiu t0, gp, %gprel(m64k_idle_pcs)   # delay slot (dead on the skip path)
+1:  lw t1, 0(t0)
+    beqz t1, main_loop                # end of table: not an idle loop
+     addiu t0, 4
+    bne m_pc, t1, 1b
+     nop
+    .set reorder
 idle_skip:
     li m_cycles, 0
     j main_loop

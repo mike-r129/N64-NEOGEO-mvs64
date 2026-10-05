@@ -24,6 +24,10 @@ uint8_t *PB_ROM;
 // Address to trigger idle-skipping
 unsigned int rom_pc_idle_skip = 0;
 
+// Idle-loop heads for the m64k idle skip, from game.ini "idle_skip=pc,pc,...".
+uint32_t rom_idle_pcs[ROM_IDLE_MAX];
+int rom_idle_npcs;
+
 // M-ROM (Z80 sound program) is small (128KB for most sets) and loaded fully
 // resident in RDRAM. V-ROM (YM2610 ADPCM samples, several MB) does not fit in
 // RDRAM and is streamed from cart on demand (see vrom_read). Both are consumed
@@ -541,18 +545,26 @@ static void rom(const char *dir, const char* name, int off, int sz, uint8_t *buf
 
 #define strcatalloc(a, b) ({ char v[strlen(a)+strlen(b)+1]; strcpy(v, a); strcat(v, b); strdup(v); })
 
-static uint32_t ini_get_integer(const char *ini, const char *key, bool *ok) {
-	int klen = strlen(key); char *kv;
-	if ((kv = strstr(ini, key)) && kv[klen] == '=') {
-		kv += klen+1;
-		if (ok) *ok = true;
-		if (kv[0] == '0' && kv[1] == 'x')
-			return strtoul(kv, NULL, 16);
-		else
-			return strtoul(kv, NULL, 10);
+// Parse "key=v1,v2,..." (decimal or 0x hex) from game.ini into out[]; returns
+// the number of values (0 if the key is absent).
+static int ini_get_list(const char *ini, const char *key, uint32_t *out, int max) {
+	int klen = strlen(key); const char *kv = ini;
+	while ((kv = strstr(kv, key))) {
+		if ((kv == ini || kv[-1] == '\n') && kv[klen] == '=') break;
+		kv += klen;
 	}
-	if (ok) *ok=false;
-	return 0;
+	if (!kv) return 0;
+	kv += klen+1;
+	int n = 0;
+	while (n < max) {
+		char *end;
+		uint32_t v = strtoul(kv, &end, 0);
+		if (end == kv) break;
+		out[n++] = v;
+		if (*end != ',') break;
+		kv = end + 1;
+	}
+	return n;
 }
 
 void rom_next_frame(void) {
@@ -651,11 +663,12 @@ void rom_load(const char *dir) {
 		ini[n] = 0;   // also fixes the unterminated-buffer parse
 		fclose(f);
 
-		bool ok;
-
-		rom_pc_idle_skip = ini_get_integer(ini, "idle_skip", &ok);
-		if (ok) debugf("[ROM] configure idle_skip: %x\n", rom_pc_idle_skip);
+		rom_idle_npcs = ini_get_list(ini, "idle_skip", rom_idle_pcs, ROM_IDLE_MAX);
+		for (int i = 0; i < rom_idle_npcs; i++)
+			debugf("[ROM] idle_skip: %06lx\n", (unsigned long)rom_idle_pcs[i]);
 	}
+	// The Musashi core's single-PC idle skip stays off: the PC build is the
+	// deterministic reference that changes are gated against.
 	rom_pc_idle_skip = 0;
 
 	#ifdef N64
