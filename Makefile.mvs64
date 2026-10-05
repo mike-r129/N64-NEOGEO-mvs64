@@ -22,6 +22,15 @@ else
 src = $(core_src) m64k/m64k.c m64k/tlb.c
 asm = hw_n64.S m64k/m64k_asm.S
 CFLAGS += -DUSE_M64K
+# Inline fast paths for the most frequent opcode forms (Bcc/DBcc, RTS,
+# common MOVE.b/.w/.l forms, ADDQ/SUBQ/CMPI/ADD/TST on simple operands).
+# Covered by the m64k testsuite, which builds with the same define.
+# make ... FP_OFF=1 builds without them, for A/B comparisons.
+ifndef FP_OFF
+CFLAGS += -DM64K_FASTPATHS
+ASFLAGS += -DM64K_FASTPATHS
+N64_ASFLAGS += -DM64K_FASTPATHS
+endif
 endif
 obj = $(src:%.c=$(BUILD_DIR)/%.o) $(asm:%.S=$(BUILD_DIR)/%.o) $(rsp:%.S=$(BUILD_DIR)/%.o)
 
