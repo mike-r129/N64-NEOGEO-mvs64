@@ -176,9 +176,7 @@ static inline bool parity(uint8_t val) {
   return (v & 1) == 0;
 }
 
-// exec_opcode is exported as z80_exec_opcode for z80_step_inline (z80.h).
-#define exec_opcode z80_exec_opcode
-void exec_opcode(z80* const z, uint8_t opcode);
+static void exec_opcode(z80* const z, uint8_t opcode);
 static void exec_opcode_cb(z80* const z, uint8_t opcode);
 static void exec_opcode_dcb(
     z80* const z, const uint8_t opcode, const uint16_t addr);
@@ -836,10 +834,41 @@ void z80_step(z80* const z) {
     process_interrupts(z);
 }
 
-// Out-of-line interrupt service for z80_step_inline: the NMI/IM0/IM2 push
-// paths stay cold instead of forcing a full register frame on every step.
-__attribute__((noinline)) void z80_process_interrupts(z80* const z) {
+// Out-of-line interrupt service for z80_run: the NMI/IM0/IM2 push paths
+// stay cold instead of forcing a full register frame on every step.
+__attribute__((noinline)) static void process_interrupts_cold(z80* const z) {
   process_interrupts(z);
+}
+
+unsigned z80_run(z80* const z, unsigned long until, uint16_t* last_pc) {
+  unsigned n = 0;
+  uint8_t any = 0;
+  uint16_t pc0;
+  do {
+    if (z->irq_line && z->iff1 && !z->int_pending) {
+      z80_gen_int(z, z->int_data);
+      z->irq_redeliver++;
+    }
+    pc0 = z->pc;
+    z->wrote = 0;
+#ifdef MVS64_Z80OPHIST
+    z80_step(z);
+#else
+    uint8_t opcode = 0x00;               // HALT executes NOPs in place
+    if (!z->halted) {
+      opcode = *(const uint8_t*)(z->rmap[z->pc >> 8] + z->pc);
+      z->pc++;
+    }
+    exec_opcode(z, opcode);
+    if (z->iff_delay | (uint8_t)(z->nmi_pending | (z->int_pending & z->iff1)))
+      process_interrupts_cold(z);   // out of line: keeps the loop small
+#endif
+    any |= z->wrote;
+    n++;
+  } while ((long)(until - z->cyc) > 0 && z->pc > pc0 && !z->halted);
+  z->wrote_any = any;
+  *last_pc = pc0;
+  return n;
 }
 
 // outputs to stdout a debug trace of the emulator
@@ -873,7 +902,7 @@ void z80_gen_int(z80* const z, uint8_t data) {
 // here, for every opcode.
 static void exec_opcode_slow(z80* const z, uint8_t opcode);
 
-void exec_opcode(z80* const z, uint8_t opcode) {
+static void exec_opcode(z80* const z, uint8_t opcode) {
   z->cyc += cyc_00[opcode];
   inc_r(z);
 
