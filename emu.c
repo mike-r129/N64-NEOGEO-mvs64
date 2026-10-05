@@ -15,6 +15,7 @@
 #include "roms.h"
 #include "platform.h"
 #include "sound.h"
+#include "input_script.h"
 
 static int cpu_trace_count = 0;
 void cpu_trace(unsigned int pc) {
@@ -65,55 +66,16 @@ int g_frame;
 
 #ifndef N64
 // --- Headless scripted input ---------------------------------------------
-// Lets the PC emu drive menus/gameplay with the human out of the loop. The
-// script is a text file (env MVS64_INPUT) of lines: "<f0> <f1> <key>", meaning
-// hold <key> from frame f0 to f1 inclusive. <key> is one of:
-//   coin start select a b c d up down left right
-// keystate is reassigned to point at hl_keys so input.c reads our buffer.
+// Lets the PC emu drive menus/gameplay with the human out of the loop: the
+// script (env MVS64_INPUT, format in input_script.h) is applied per guest
+// frame. keystate is reassigned to point at hl_keys so input.c reads our
+// buffer.
 extern const uint8_t *keystate;
 static uint8_t hl_keys[512];
-#define HL_MAX_EVENTS 256
-static struct { int f0, f1, sc; } hl_script[HL_MAX_EVENTS];
-static int hl_nevents;
-
-static int hl_keyname_to_sc(const char *n) {
-	if (!strcmp(n, "coin"))   return PLAT_KEY_COIN_1;
-	if (!strcmp(n, "start"))  return PLAT_KEY_P1_START;
-	if (!strcmp(n, "select")) return PLAT_KEY_P1_SELECT;
-	if (!strcmp(n, "a"))      return PLAT_KEY_P1_A;
-	if (!strcmp(n, "b"))      return PLAT_KEY_P1_B;
-	if (!strcmp(n, "c"))      return PLAT_KEY_P1_C;
-	if (!strcmp(n, "d"))      return PLAT_KEY_P1_D;
-	if (!strcmp(n, "up"))     return PLAT_KEY_P1_UP;
-	if (!strcmp(n, "down"))   return PLAT_KEY_P1_DOWN;
-	if (!strcmp(n, "left"))   return PLAT_KEY_P1_LEFT;
-	if (!strcmp(n, "right"))  return PLAT_KEY_P1_RIGHT;
-	return -1;
-}
-
-static void hl_load_script(const char *path) {
-	FILE *f = fopen(path, "r");
-	if (!f) { fprintf(stderr, "[INPUT] cannot open %s\n", path); return; }
-	char line[128], key[32];
-	int f0, f1;
-	while (fgets(line, sizeof(line), f)) {
-		if (line[0] == '#' || line[0] == '\n') continue;
-		if (sscanf(line, "%d %d %31s", &f0, &f1, key) == 3) {
-			int sc = hl_keyname_to_sc(key);
-			if (sc < 0) { fprintf(stderr, "[INPUT] bad key '%s'\n", key); continue; }
-			if (hl_nevents < HL_MAX_EVENTS)
-				hl_script[hl_nevents++] = (typeof(hl_script[0])){ f0, f1, sc };
-		}
-	}
-	fclose(f);
-	fprintf(stderr, "[INPUT] loaded %d events from %s\n", hl_nevents, path);
-}
 
 static void hl_apply_input(int frame) {
 	memset(hl_keys, 0, sizeof(hl_keys));
-	for (int i = 0; i < hl_nevents; i++)
-		if (frame >= hl_script[i].f0 && frame <= hl_script[i].f1)
-			hl_keys[hl_script[i].sc] = 1;
+	input_script_keys(frame, hl_keys);
 }
 
 // --- Headless WAV capture (16-bit signed stereo, little-endian host) ---------
@@ -471,7 +433,7 @@ int main(int argc, char *argv[]) {
 	if (headless) {
 		keystate = hl_keys;                 // drive input from our scripted buffer
 		const char *script = getenv("MVS64_INPUT");
-		if (script) hl_load_script(script);
+		if (script) input_script_load(script);
 		const char *wav = getenv("MVS64_WAV");
 		if (wav) wav_open(wav, AUDIO_FREQ);
 	} else {

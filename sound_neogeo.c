@@ -17,10 +17,11 @@
 
 // Audio-health telemetry. MVS64_SNDHEALTH enables the [SNDRMS]/[AIPUMP] USB
 // logs in a normal build, so real-hardware behaviour can be read off a
-// flashcart USB capture while actually playing. MVS64_SNDOSD implies it
-// too; keep this gate identical to platform_n64.c's, or an OSD build
-// writes an SD log without the [SNDRMS] lines.
-#if defined(MVS64_SNDHEALTH) || defined(MVS64_SNDOSD)
+// flashcart USB capture while actually playing. MVS64_SNDOSD and
+// MVS64_AUTOINPUT (scripted runs) imply it too; keep this gate identical to
+// platform_n64.c's, or an OSD build writes an SD log without the [SNDRMS]
+// lines.
+#if defined(MVS64_AUTOINPUT) || defined(MVS64_SNDHEALTH) || defined(MVS64_SNDOSD)
 #define SND_HEALTH 1
 #endif
 

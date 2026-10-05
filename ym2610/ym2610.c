@@ -3121,7 +3121,7 @@ INLINE s32 OPNB_ADPCMB_CALC(ADPCMB *adpcmb) {
  * [RSPWAIT] every 128 whole-pump calls (YM2610_wp_finish_async) — so a stall
  * source is measured, not guessed. WP_OFF=1 builds accumulate but never
  * print. */
-#if defined(N64) && defined(MVS64_RSPWAITPROF)
+#if defined(N64) && (defined(MVS64_AUTOINPUT) || defined(MVS64_RSPWAITPROF))
 #define RSPWAIT_PROF 1
 static u32 rspwait_fm, rspwait_fm_max, rspwait_adpcm, rspwait_adpcm_max;
 #endif
@@ -5510,7 +5510,7 @@ void YM2610Update_stream(int length) {
 #undef YMPROF_T
 #undef YMPROF_A
 
-#if defined(MVS64_SNDHEALTH) || defined(MVS64_SNDOSD)
+#if defined(MVS64_AUTOINPUT) || defined(MVS64_SNDHEALTH) || defined(MVS64_SNDOSD)
 #include <stdio.h>
 // MVS64 diagnostic: one-line snapshot of every state element that can hold a
 // sustained tone, printed by sound_neogeo.c's [SNDRMS] telemetry (~1/s). Used

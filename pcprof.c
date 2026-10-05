@@ -4,7 +4,8 @@
 // interrupt_exception_frame libdragon publishes during interrupt dispatch)
 // into a per-frame ring. At frame end the ring is folded into a 32-byte
 // (= one VR4300 icache line) histogram over .text, counting only guest
-// frames >= MVS64_PCPROF (the define's value), so a run can skip boot.
+// frames >= MVS64_PCPROF (the define's value; scripted input is frame-keyed,
+// so this selects the same game content in every build).
 // Every PCPROF_WINDOW frames the non-zero lines are dumped as
 // "[PCP] <hexline>:<count> ..." for offline symbolization (via nm).
 //

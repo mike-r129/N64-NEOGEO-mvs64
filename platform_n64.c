@@ -4,13 +4,14 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include "platform_n64_osd.h"
+#include "input_script.h"
 
 // Audio-health telemetry (see sound_neogeo.c). MVS64_SNDHEALTH enables the
-// [AIPUMP] USB log.
+// [AIPUMP] USB log; MVS64_AUTOINPUT (scripted runs) implies it.
 // MVS64_SNDOSD additionally draws the audio-health numbers on screen (see
 // plat_endframe) so a real console diagnoses sound loss with no cable or SD
 // card pull — it implies the SD/USB telemetry too.
-#if defined(MVS64_SNDHEALTH) || defined(MVS64_SNDOSD)
+#if defined(MVS64_AUTOINPUT) || defined(MVS64_SNDHEALTH) || defined(MVS64_SNDOSD)
 #define SND_HEALTH 1
 #endif
 
@@ -213,6 +214,9 @@ void plat_init(int audiofreq, int fps) {
 	extern int mvs64_display_buffers;   // 3 (see plat_detach_show), or 2
 	display_init(RESOLUTION_320x240, DEPTH_16_BPP, mvs64_display_buffers, GAMMA_NONE, ANTIALIAS_RESAMPLE);
     dfs_init(DFS_DEFAULT_LOCATION);
+#ifdef MVS64_AUTOINPUT
+    input_script_load("rom:/input.txt");
+#endif
     rdpq_init();
     // rdpq_debug_start();
 
@@ -611,6 +615,19 @@ int plat_poll(void) {
     // Z inserts a coin/credit (the MVS has no coin without this); C-up = select.
     if (ckeys.c[0].Z)       { keystate[PLAT_KEY_COIN_1] = 1; }
     if (ckeys.c[0].C_up)    { keystate[PLAT_KEY_P1_SELECT] = 1; }
+
+#ifdef MVS64_AUTOINPUT
+    // Scripted input (make ... INPUT=<file>): replays rom:/input.txt, the
+    // PC headless harness's MVS64_INPUT format, keyed by guest frame. The
+    // state set here is read during the next emulated frame, g_frame, the
+    // same frame the PC harness applies it to, so identical scripts give
+    // both builds identical input (and comparable traces) at any N64 speed.
+    {
+        extern int g_frame;
+        input_script_keys(g_frame, keystate);
+        if ((g_frame % 120) == 0) plat_log("[AUTOINPUT] frame=%d\n", g_frame);
+    }
+#endif
 
     return 1;
 }
