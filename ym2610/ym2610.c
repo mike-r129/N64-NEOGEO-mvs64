@@ -3090,6 +3090,23 @@ INLINE s32 OPNB_ADPCMB_CALC(ADPCMB *adpcmb) {
 	return adpcmb->adpcml;
 }
 
+/* ============================================================================
+ * MVS64: RSP ADPCM offload (-DMVS64_RSPADPCM, N64 only).
+ *
+ * The ADPCM source-address stream is deterministic (it does not depend on the
+ * decoded data), so per chunk the CPU can stage exactly the source bytes each
+ * channel will consume (through the existing streamed v.rom windows), hand the
+ * RSP a parameter block, and read back per-sample L/R contribution arrays plus
+ * the updated channel states. rsp_audio.S is a bit-exact port of the two
+ * decoders above, restricted to the linear case; ADPCM-B chunks that could hit
+ * the limit-wrap or repeat-restart paths fall back to the C decoder for that
+ * chunk (rare), as does any channel whose staging would overflow.
+ *
+ * -DMVS64_RSPADPCM_VERIFY: dual-compute gate. The C decoders stay
+ * authoritative; the RSP result is compared per sample and per state field
+ * every chunk, and [RSPADPCM] telemetry reports the mismatch counters (the
+ * gate is ZERO mismatches over a long ares run).
+ * ==========================================================================*/
 
 #if defined(N64) && defined(MVS64_RSPADPCM)
 #include <libdragon.h>
@@ -3206,6 +3223,13 @@ static void rspwpa_pull_a(int c);
 static int rspwp_dead2;   /* tentative; defined with the WP section below */
 #endif
 
+/* Stage the source bytes one channel will consume this chunk: the bytes at
+ * the even addresses in [now_addr, now_addr+nib-1], i.e. byte addresses
+ * starting at (now_addr+1)>>1. Returns the byte count. Each run that lies
+ * inside the resident image or the current window is copied with one memcpy
+ * instead of a per-byte fetch. The first byte of every run still goes
+ * through ym2610_vrom_fetch, so window refills happen at exactly the same
+ * addresses as a per-byte loop would. */
 static u32 rspa_stage(int win, u32 now_addr, u32 nib, u8 *dst,
 		const u8 *resident, u32 size) {
 	u32 a0b = (now_addr + 1) >> 1;
