@@ -5,7 +5,7 @@
 #include <stdbool.h>
 #include "roms.h"
 
-#ifdef N64
+#ifdef USE_M64K
 
 // M68K memory handlers on N64 host.
 //

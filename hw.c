@@ -5,7 +5,7 @@
 #include "roms.h"
 #include "video.h"
 #include "emu.h"
-#ifdef N64
+#ifdef USE_M64K
 #include "m64k/m64k.h"
 #else
 #include "m68k.h"
@@ -28,6 +28,7 @@ uint8_t P_ROM_VECTOR[0x80];
 uint8_t BIOS[128*1024];
 uint8_t WORK_RAM[64*1024] ALIGN_64K;
 uint8_t BACKUP_RAM[64*1024] ALIGN_64K;
+uint8_t MEMCARD_RAM[64*1024] ALIGN_64K;   // 68k bank 0x8 (memory card); open-bus 0xFF = no card
 uint16_t PALETTE_RAM[8*1024];  // two banks
 uint16_t VIDEO_RAM[34*1024];
 
@@ -71,7 +72,7 @@ void write_pbrom(uint32_t addr, uint32_t val, int sz) {
 		// If the PBROM area linearly mapped, update the mapping.
 		if (banks[0x2].mem) {
 			banks[0x2].mem = pbrom_linear() + val*0x100000;
-			#ifdef N64
+			#ifdef USE_M64K
 			extern m64k_t m64k;
 			m64k_map_memory(&m64k, 0x200000, 0x100000, banks[0x2].mem, false);
 			// m64k_map_memory_change(&m64k, pbrom_memid, banks[0x2].mem, false);
@@ -181,7 +182,7 @@ void write_hwio(uint32_t addr, uint32_t val, int sz)  {
 }
 
 
-#ifndef N64
+#ifndef USE_M64K
 
 unsigned int  m68k_read_memory_8(unsigned int address) {
 	Bank *b = &banks[(address>>20)&0xF];
@@ -259,6 +260,7 @@ void hw_init(void) {
 	uint8_t *PB_ROM = pbrom_linear();
 
 	memset(banks, 0, sizeof(banks));
+	memset(MEMCARD_RAM, 0xFF, sizeof(MEMCARD_RAM));   // no card inserted -> open-bus 0xFF
 	memcpy(P_ROM_VECTOR, P_ROM, sizeof(P_ROM_VECTOR));
 	PALETTE_RAM_BANK = 0x0000;
 
@@ -270,10 +272,11 @@ void hw_init(void) {
 		banks[0x2] = (Bank){ NULL,         0xFFFFF,   read_pbrom,      write_pbrom };
 	banks[0x3] = (Bank){ NULL,             0x00000,   read_hwio,       write_hwio };
 	banks[0x4] = (Bank){ NULL,             0x00000,   video_palette_r, video_palette_w };
+	banks[0x8] = (Bank){ MEMCARD_RAM,      0x0FFFF,   NULL,            write_unk };
 	banks[0xC] = (Bank){ BIOS,             0x1FFFF,   NULL,            write_unk };
 	banks[0xD] = (Bank){ BACKUP_RAM,       0x0FFFF,   NULL,            write_unk };
 
-	#ifdef N64
+	#ifdef USE_M64K
 	extern m64k_t m64k;
 	disable_interrupts();
 
@@ -283,6 +286,7 @@ void hw_init(void) {
 	if (PB_ROM) {
 		m64k_map_memory(&m64k, 0x200000, 0x100000, PB_ROM+0x000000, false);
 	}
+	m64k_map_memory(&m64k, 0x800000, 0x010000, MEMCARD_RAM, true);
 	m64k_map_memory(&m64k, 0xC00000, 0x020000, BIOS,       false);
 	m64k_map_memory(&m64k, 0xD00000, 0x010000, BACKUP_RAM, true);
 
