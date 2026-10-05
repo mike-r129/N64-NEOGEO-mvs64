@@ -1,6 +1,9 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
+#ifndef N64
+#include <stdlib.h>
+#endif
 #include "emu.h"
 #ifdef USE_M64K
 #include "m64k/m64k.h"
@@ -11,6 +14,7 @@
 #include "video.h"
 #include "roms.h"
 #include "platform.h"
+#include "sound.h"
 
 static int cpu_trace_count = 0;
 void cpu_trace(unsigned int pc) {
@@ -56,6 +60,101 @@ void cpu_start_trace(int cnt) {
 }
 
 static int g_frame;
+
+#ifndef N64
+// --- Headless scripted input ---------------------------------------------
+// Lets the PC emu drive menus/gameplay with the human out of the loop. The
+// script is a text file (env MVS64_INPUT) of lines: "<f0> <f1> <key>", meaning
+// hold <key> from frame f0 to f1 inclusive. <key> is one of:
+//   coin start select a b c d up down left right
+// keystate is reassigned to point at hl_keys so input.c reads our buffer.
+extern const uint8_t *keystate;
+static uint8_t hl_keys[512];
+#define HL_MAX_EVENTS 256
+static struct { int f0, f1, sc; } hl_script[HL_MAX_EVENTS];
+static int hl_nevents;
+
+static int hl_keyname_to_sc(const char *n) {
+	if (!strcmp(n, "coin"))   return PLAT_KEY_COIN_1;
+	if (!strcmp(n, "start"))  return PLAT_KEY_P1_START;
+	if (!strcmp(n, "select")) return PLAT_KEY_P1_SELECT;
+	if (!strcmp(n, "a"))      return PLAT_KEY_P1_A;
+	if (!strcmp(n, "b"))      return PLAT_KEY_P1_B;
+	if (!strcmp(n, "c"))      return PLAT_KEY_P1_C;
+	if (!strcmp(n, "d"))      return PLAT_KEY_P1_D;
+	if (!strcmp(n, "up"))     return PLAT_KEY_P1_UP;
+	if (!strcmp(n, "down"))   return PLAT_KEY_P1_DOWN;
+	if (!strcmp(n, "left"))   return PLAT_KEY_P1_LEFT;
+	if (!strcmp(n, "right"))  return PLAT_KEY_P1_RIGHT;
+	return -1;
+}
+
+static void hl_load_script(const char *path) {
+	FILE *f = fopen(path, "r");
+	if (!f) { fprintf(stderr, "[INPUT] cannot open %s\n", path); return; }
+	char line[128], key[32];
+	int f0, f1;
+	while (fgets(line, sizeof(line), f)) {
+		if (line[0] == '#' || line[0] == '\n') continue;
+		if (sscanf(line, "%d %d %31s", &f0, &f1, key) == 3) {
+			int sc = hl_keyname_to_sc(key);
+			if (sc < 0) { fprintf(stderr, "[INPUT] bad key '%s'\n", key); continue; }
+			if (hl_nevents < HL_MAX_EVENTS)
+				hl_script[hl_nevents++] = (typeof(hl_script[0])){ f0, f1, sc };
+		}
+	}
+	fclose(f);
+	fprintf(stderr, "[INPUT] loaded %d events from %s\n", hl_nevents, path);
+}
+
+static void hl_apply_input(int frame) {
+	memset(hl_keys, 0, sizeof(hl_keys));
+	for (int i = 0; i < hl_nevents; i++)
+		if (frame >= hl_script[i].f0 && frame <= hl_script[i].f1)
+			hl_keys[hl_script[i].sc] = 1;
+}
+
+// --- Headless WAV capture (16-bit signed stereo, little-endian host) ---------
+// Lets the harness validate generated audio (RMS/FFT on the .wav) with no speakers and
+// no human in the loop. Enabled by env MVS64_WAV=<path>.
+static FILE *wav_fp;
+static uint32_t wav_data_bytes;
+static int wav_freq;
+
+static void wav_open(const char *path, int freq) {
+	wav_fp = fopen(path, "wb");
+	if (!wav_fp) { fprintf(stderr, "[WAV] cannot open %s\n", path); return; }
+	wav_freq = freq;
+	wav_data_bytes = 0;
+	uint8_t hdr[44] = {0};
+	fwrite(hdr, 1, sizeof(hdr), wav_fp);   // placeholder, patched in wav_close()
+	fprintf(stderr, "[WAV] capturing to %s (%d Hz, 16-bit stereo)\n", path, freq);
+}
+
+static void wav_write(const int16_t *stereo, int nframes) {
+	if (!wav_fp) return;
+	fwrite(stereo, sizeof(int16_t) * 2, (size_t)nframes, wav_fp);
+	wav_data_bytes += (uint32_t)nframes * 2 * sizeof(int16_t);
+}
+
+static void wav_close(void) {
+	if (!wav_fp) return;
+	uint32_t riff = 36 + wav_data_bytes, fmtlen = 16, byterate = (uint32_t)wav_freq * 4;
+	uint16_t fmt = 1, ch = 2, bits = 16, blockalign = 4;
+	uint32_t freq = (uint32_t)wav_freq;
+	fseek(wav_fp, 0, SEEK_SET);
+	fwrite("RIFF", 1, 4, wav_fp); fwrite(&riff, 4, 1, wav_fp); fwrite("WAVE", 1, 4, wav_fp);
+	fwrite("fmt ", 1, 4, wav_fp); fwrite(&fmtlen, 4, 1, wav_fp);
+	fwrite(&fmt, 2, 1, wav_fp); fwrite(&ch, 2, 1, wav_fp); fwrite(&freq, 4, 1, wav_fp);
+	fwrite(&byterate, 4, 1, wav_fp); fwrite(&blockalign, 2, 1, wav_fp); fwrite(&bits, 2, 1, wav_fp);
+	fwrite("data", 1, 4, wav_fp); fwrite(&wav_data_bytes, 4, 1, wav_fp);
+	fclose(wav_fp); wav_fp = NULL;
+}
+
+#define AUDIO_FREQ MVS64_AUDIO_RATE
+// Sized for MVS64_SIMFPS as low as 5fps (AUDIO_FREQ/5 samples/frame); see emu loop.
+static int16_t audio_frame[(AUDIO_FREQ / 5 + 16) * 2];
+#endif
 #ifdef USE_M64K
 m64k_t m64k;
 #endif
@@ -64,13 +163,20 @@ static uint64_t m68k_clock;
 static EmuEvent events[MAX_EVENTS];
 uint32_t profile_hw_io;
 uint32_t profile_dma_load;
+uint32_t profile_m68k;   // ticks inside the 68k core this frame (incl. MMIO)
+uint32_t profile_snd;    // ticks synthesizing audio (Z80+YM2610) this frame
 
 static uint64_t m68k_exec(uint64_t clock) {
 	clock /= M68K_CLOCK_DIV;
 	if (clock > m68k_clock) {
 		#ifdef USE_M64K
-		debugf("m68k_exec: %d\n", (int)(clock - m68k_clock));
+		#ifdef N64
+		uint32_t t0 = TICKS_READ();
 		m68k_clock = m64k_run(&m64k, clock);
+		profile_m68k += TICKS_DISTANCE(t0, TICKS_READ());
+		#else
+		m68k_clock = m64k_run(&m64k, clock);
+		#endif
 		#else
 		m68k_clock += m68k_execute(clock - m68k_clock);
 		#endif
@@ -180,6 +286,7 @@ uint32_t emu_render(void *arg) {
 			skip++;
 			if (skip < MAX_SKIP) {
 				debugf("[RENDER] skip frame\n");
+				plat_audio_pump();   // audio pumps once per frame regardless
 				return FRAME_CLOCK;
 			}
 			debugf("[RENDER] max skip\n");
@@ -194,6 +301,9 @@ uint32_t emu_render(void *arg) {
 	if (CONFIG_FRAMESKIP_MODE == 1) {
 		if (g_frame & 1) {
 			debugf("[RENDER] skip frame\n");
+			#ifdef N64
+			plat_audio_pump();   // audio pumps once per frame regardless
+			#endif
 			return FRAME_CLOCK;
 		}
 	}
@@ -210,6 +320,12 @@ uint32_t emu_render(void *arg) {
 
 	#ifdef N64
 	render_time = TICKS_DISTANCE(t0, TICKS_READ());
+
+	// Top up the audio once per frame, right after the frame's draw
+	// commands were issued. sound_gen_samples() is rate-agnostic and the
+	// AI ring is wall-clock driven, so where in the frame this runs does
+	// not affect audio timing.
+	plat_audio_pump();
 	#endif
 
 	return FRAME_CLOCK;
@@ -252,8 +368,42 @@ int main(int argc, char *argv[]) {
 	argc = 0; argv = NULL;
 	#endif
 
-	plat_init(44100, FPS);
+	plat_init(MVS64_AUDIO_RATE, FPS);
+
+	#ifndef N64
+	// Headless test harness: when MVS64_FRAMES=N is set, run N frames with no
+	// SDL window (use SDL_VIDEODRIVER=dummy / SDL_AUDIODRIVER=dummy), dumping a
+	// screenshot every MVS64_SHOT frames and the 68K PC each second, then exit.
+	// Lets us validate boot progression with the human out of the loop.
+	const char *hl_env = getenv("MVS64_FRAMES");
+	int headless = hl_env ? atoi(hl_env) : 0;
+	const char *shot_env = getenv("MVS64_SHOT");
+	int shot_interval = shot_env ? atoi(shot_env) : 0;
+	const char *sndchunk_env = getenv("MVS64_SNDCHUNK");
+	int sndchunk = sndchunk_env ? atoi(sndchunk_env) : 0;
+	// MVS64_SIMFPS=N reproduces the N64's REALTIME audio decoupling on the PC
+	// headless harness: the N64 AI drains at the wall-clock rate, so when the 68k
+	// loop runs at N fps it generates AUDIO_FREQ/N samples per LOGIC frame (more
+	// than the 1/60s the game logic assumes), desyncing 68k-driven sound events
+	// from the music. Setting this < 60 mimics a slow N64 so we can repro the
+	// in-combat stuck note without hardware. 0/unset = faithful 60fps lock.
+	const char *simfps_env = getenv("MVS64_SIMFPS");
+	int simfps = simfps_env ? atoi(simfps_env) : 0;
+	const int spf = AUDIO_FREQ / (simfps > 0 ? simfps : FPS); // samples per video frame
+	if (headless) {
+		keystate = hl_keys;                 // drive input from our scripted buffer
+		const char *script = getenv("MVS64_INPUT");
+		if (script) hl_load_script(script);
+		const char *wav = getenv("MVS64_WAV");
+		if (wav) wav_open(wav, AUDIO_FREQ);
+	} else {
+		plat_enable_audio(1);               // start SDL playback for interactive use
+	}
+	plat_enable_video(headless ? false : true);
+	#else
 	plat_enable_video(true);
+	plat_enable_audio(1);
+	#endif
 
 	#ifdef N64
 	rom_load("rom:/");
@@ -290,17 +440,67 @@ int main(int argc, char *argv[]) {
 		render_time = 0;
 		profile_hw_io = 0;
 		profile_dma_load = 0;
+		profile_m68k = 0;
+		profile_snd = 0;
 		#ifdef N64
 		uint32_t t0 = TICKS_READ();
 		#endif
+		#ifndef N64
+		if (headless) hl_apply_input(g_frame);
+		#endif
+
 		emu_run_frame();
 		if (!plat_poll()) break;
+
+		#ifndef N64
+		// Produce one video-frame's worth of audio through the sound seam.
+		if (headless) {
+			int n;
+			if (sndchunk > 0) {
+				// Validation: produce spf samples in arbitrary sub-chunks to
+				// exercise the rate-agnostic sound_gen_samples() path the N64
+				// AI pump uses (it asks for ~1764 at a time). Concatenation must
+				// be identical music to a single spf call.
+				int off = 0;
+				while (off < spf) {
+					int c = spf - off; if (c > sndchunk) c = sndchunk;
+					sound_gen_samples(audio_frame + off * 2, c);
+					off += c;
+				}
+				n = spf;
+			} else {
+				n = sound_gen_samples(audio_frame, spf);
+			}
+			wav_write(audio_frame, n);
+		} else {
+			int16_t *abuf; int an;
+			plat_beginaudio(&abuf, &an);
+			sound_gen_samples(abuf, an);
+			plat_endaudio();
+		}
+		#endif
+
+		#ifndef N64
+		if (headless) {
+			if (shot_interval && (g_frame % shot_interval) == 0) {
+				char fn[64];
+				sprintf(fn, "shot_%05d.bmp", g_frame);
+				plat_save_screenshot(fn);
+			}
+			if ((g_frame % 60) == 0)
+				fprintf(stderr, "[HEADLESS] frame %d  PC=%06x\n",
+					g_frame, (uint32_t)m68k_get_reg(NULL, M68K_REG_PC));
+			if (g_frame >= headless) break;
+		}
+		#endif
 
 		#ifdef N64
 		uint32_t emu_time = TICKS_DISTANCE(t0, TICKS_READ());
 
-		debugf("[PROFILE] cpu:%.2f%% io:%.2f%% draw:%.2f%% dma:%.2f%% PC:%06lx\n",
+		debugf("[PROFILE] cpu:%.2f%% m68k:%.2f%% snd:%.2f%% io:%.2f%% draw:%.2f%% dma:%.2f%% PC:%06lx\n",
 			(float)emu_time * 100.f / (float)(TICKS_PER_SECOND / 60),
+			(float)profile_m68k * 100.f / (float)(TICKS_PER_SECOND / 60),
+			(float)profile_snd * 100.f / (float)(TICKS_PER_SECOND / 60),
 			(float)profile_hw_io * 100.f / (float)(TICKS_PER_SECOND / 60),
 			(float)render_time * 100.f / (float)(TICKS_PER_SECOND / 60),
 			(float)profile_dma_load * 100.f / (float)(TICKS_PER_SECOND / 60),
@@ -326,6 +526,7 @@ int main(int argc, char *argv[]) {
 	m68k_exec(g_clock+100);
 
 	#ifndef N64
+	wav_close();
 	FILE *f = fopen("vram.dump", "wb");
 	fwrite(VIDEO_RAM, 1, sizeof(VIDEO_RAM), f);
 	fclose(f);

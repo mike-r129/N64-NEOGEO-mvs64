@@ -91,6 +91,10 @@ extern int g_screen_pitch;
 void plat_init(int audiofreq, int fps);
 int plat_poll(void);
 
+// Telemetry logger: writes to the debug channels (USB + emulator ISViewer on
+// N64, stderr on PC), same as debugf. Used by the sound subsystem.
+void plat_log(const char *fmt, ...);
+
 void plat_enable_audio(int enable);
 void plat_enable_video(int enable);
 
@@ -101,5 +105,10 @@ void plat_endframe(void);
 
 void plat_beginaudio(int16_t **buf, int *nsamples);
 void plat_endaudio(void);
+
+// N64 only: generate audio to keep the AI staging ring topped up (platform_n64.c).
+// The AI DMA is the real-time clock master; this decouples sound from the 68k
+// frame rate. Called once per frame from emu_render().
+void plat_audio_pump(void);
 
 #endif

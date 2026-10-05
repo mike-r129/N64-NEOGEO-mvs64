@@ -41,6 +41,9 @@ typedef struct {
 	uint8_t *PROM; int prom_size;
 	uint8_t *CROM; int crom_size;
 	uint8_t *SROM; int srom_size;
+	uint8_t *VROM; int vrom_size;   // YM2610 ADPCM-A sample ROM (flat; also ADPCM-B unless VBROM)
+	uint8_t *VBROM; int vbrom_size; // separate YM2610 ADPCM-B ROM (v2x sets), else NULL
+	uint8_t *MROM; int mrom_size;   // Z80 sound program (flat)
 } Game;
 
 typedef struct {
@@ -194,7 +197,11 @@ void cmc_decrypt_srom(uint8_t* crom, uint32_t crom_size, uint8_t* srom, uint32_t
 void cmc_decrypt(Game *g) {
 	static const uint8_t extra_xor[65536] = { [GAME_SENGOKU3]=0xFE, [GAME_S1945P]=0x05 };
 
-	if (extra_xor[g->code] == 0) panic("unsupported CMC encrypted ROM (code: %04x)\n", g->code);
+	// Only CMC42 sets with a known key are supported. CMC50 sets (and with them
+	// every set whose Z80 M1 or ADPCM V-ROMs are encrypted too) stop here.
+	if (extra_xor[g->code] == 0)
+		panic("error: unsupported encrypted set (NGH %04x): unknown CMC C-ROM key; "
+		      "CMC50 sets with encrypted M1/V-ROMs are not supported yet\n", g->code);
 	cmc_decrypt_crom(g->CROM, g->crom_size, &cmc42_tables, extra_xor[g->code]);
 
 	g->srom_size = 128*1024;
@@ -275,13 +282,60 @@ bool is_bios(char *fn) {
 	return stranyprefix(fn, bios);
 }
 
-int romtype(char *fn, char ch) {
-	char *pt = fn-1;
+// Index of a ROM file of type <ch>: the number right after the first <ch>
+// that is followed by a digit (MAME "063-p1.p1" -> 1). Up to two digits are
+// read, so the separate ADPCM-A/B sets ("001-v11.v11" .. "001-v23.v23")
+// parse as 11..23 instead of colliding on their first digit. 0 = no match.
+int romtype(const char *fn, char ch) {
+	const char *pt = fn-1;
 	while ((pt = strchr(pt+1, ch))) {
-		if (pt[1] >= '1' && pt[1] <= '9')
-			return pt[1]-'0';
+		if (pt[1] >= '1' && pt[1] <= '9') {
+			int n = pt[1]-'0';
+			if (pt[2] >= '0' && pt[2] <= '9')
+				n = n*10 + pt[2]-'0';
+			return n;
+		}
 	}
 	return 0;
+}
+
+// Sound sample ROMs come in two layouts. Most sets have one ADPCM ROM space
+// shared by ADPCM-A and ADPCM-B ("v1".."v4"); some early sets have separate
+// ADPCM-A ("v11".."v1N") and ADPCM-B ("v21".."v2N") ROMs. Returns the set
+// (0 = shared/ADPCM-A, 1 = ADPCM-B) and stores the index within it.
+int vromtype(const char *fn, int *idx) {
+	int n = romtype(fn, 'v');
+	if (n < 10) { *idx = n; return 0; }
+	*idx = n % 10;
+	if (*idx == 0 || n / 10 > 2) panic("error: unsupported V-ROM name: %s\n", fn);
+	return n / 10 - 1;
+}
+
+// mvsmakerom --test-romnames: check the ROM-name parser on real MAME set file
+// names (no ROM data needed).
+int test_romnames(void) {
+	static const struct { const char *fn; char type; int idx; int vset; } t[] = {
+		{ "063-p1.p1",   'p', 1,  -1 },   // samsho2
+		{ "063-s1.s1",   's', 1,  -1 },
+		{ "063-m1.m1",   'm', 1,  -1 },
+		{ "063-c8.c8",   'c', 8,  -1 },
+		{ "063-v4.v4",   'v', 4,   0 },
+		{ "242-p2.sp2",  'p', 2,  -1 },   // kof98 second P-ROM
+		{ "001-v11.v11", 'v', 1,   0 },   // nam1975: separate ADPCM-A
+		{ "001-v13.v13", 'v', 3,   0 },
+		{ "001-v21.v21", 'v', 1,   1 },   //          and ADPCM-B
+		{ "001-v23.v23", 'v', 3,   1 },
+	};
+	int fail = 0;
+	for (int i = 0; i < (int)(sizeof(t)/sizeof(t[0])); i++) {
+		int idx = romtype(t[i].fn, t[i].type), vset = -1;
+		if (t[i].type == 'v') vset = vromtype(t[i].fn, &idx);
+		bool ok = idx == t[i].idx && vset == t[i].vset;
+		printf("%s %-12s %c idx=%d vset=%d\n", ok ? "ok  " : "FAIL", t[i].fn, t[i].type, idx, vset);
+		fail += !ok;
+	}
+	printf("%s\n", fail ? "romnames: FAILED" : "romnames: all ok");
+	return fail ? 1 : 0;
 }
 
 void romset_add(Romset *r, int idx, mz_zip_archive_file_stat *stat) {
@@ -344,12 +398,15 @@ void load_game(const char *fn, Game *game) {
 
 	if (!mz_zip_reader_init_file(&zip, fn, 0)) panic("%s\n", mz_zip_get_error_string(mz_zip_get_last_error(&zip)));
 
-	Romset P, C, S, X;
+	Romset P, C, S, X, V, VB, M;
 
 	memset(&P, 0, sizeof(Romset));
 	memset(&C, 0, sizeof(Romset));
 	memset(&S, 0, sizeof(Romset));
 	memset(&X, 0, sizeof(Romset));
+	memset(&V, 0, sizeof(Romset));
+	memset(&VB, 0, sizeof(Romset));
+	memset(&M, 0, sizeof(Romset));
 
 	for (int index = 0;;index++) {
 		mz_zip_archive_file_stat stat;
@@ -365,6 +422,11 @@ void load_game(const char *fn, Game *game) {
 		if ((idx = romtype(fn, 'g'))) romset_add(&P, idx, &stat); // some PROMs are called pg1/pg2
 		if ((idx = romtype(fn, 's'))) romset_add(&S, idx, &stat);
 		if ((idx = romtype(fn, 'c'))) romset_add(&C, idx, &stat);
+		if (romtype(fn, 'v')) {                                   // YM2610 ADPCM
+			int vset = vromtype(fn, &idx);
+			romset_add(vset ? &VB : &V, idx, &stat);
+		}
+		if ((idx = romtype(fn, 'm'))) romset_add(&M, idx, &stat); // Z80 program (m1)
 		if (strstr(fn, "sma")) romset_add(&X, 1, &stat);
 	}
 
@@ -431,6 +493,23 @@ void load_game(const char *fn, Game *game) {
 		cmc_decrypt(game);
 	}
 
+	// Load V (YM2610 ADPCM-A/B) and M (Z80 program) ROMs.
+	// Both are flat byte streams concatenated in index order: no interleave and
+	// no byteswap (unlike the big-endian 68k PROM). They feed the sound subsystem.
+	if (romset_count(&V)) {
+		game->VROM = romset_load(&V, &zip, 0);
+		game->vrom_size = V.total_size;
+	}
+	if (romset_count(&VB)) {
+		if (!romset_count(&V)) panic("error: ADPCM-B ROMs (v2x) without ADPCM-A ROMs (v1x)\n");
+		game->VBROM = romset_load(&VB, &zip, 0);
+		game->vbrom_size = VB.total_size;
+	}
+	if (romset_count(&M)) {
+		game->MROM = romset_load(&M, &zip, 0);
+		game->mrom_size = M.total_size;
+	}
+
 	// Compact CROM
 	while (memcmp(game->CROM+game->crom_size-256, game->CROM+game->crom_size-128, 128) == 0)
 		game->crom_size -= 128;
@@ -453,6 +532,8 @@ void patch_game(Game *game) {
 }
 
 int main(int argc, char *argv[]) {
+	if (argc == 2 && !strcmp(argv[1], "--test-romnames"))
+		return test_romnames();
 	if (argc < 3) {
 		fprintf(stderr, "MVS64 ROM conversion tool\n\n");
 		fprintf(stderr, "Usage:\n");
@@ -493,6 +574,33 @@ int main(int argc, char *argv[]) {
 
 	outfn[off] = 's';
 	saveto(game.SROM, game.srom_size, outfn);
+
+	if (game.vrom_size) {
+		outfn[off] = 'v';
+		saveto(game.VROM, game.vrom_size, outfn);
+	}
+	if (game.vbrom_size) {
+		strcpy(outfn+off, "vb.rom");
+		saveto(game.VBROM, game.vbrom_size, outfn);
+		strcpy(outfn+off, "?.rom");
+	}
+	if (game.mrom_size) {
+		outfn[off] = 'm';
+		saveto(game.MROM, game.mrom_size, outfn);
+	}
+
+	// Everything above ends up in the ROM's filesystem. Most flashcarts cap
+	// the ROM at 64 MB, so report the payload per region.
+	long total = (long)game.prom_size + game.crom_size + game.srom_size +
+	             game.vrom_size + game.vbrom_size + game.mrom_size +
+	             bios.prom_size + bios.srom_size;
+	printf("NGH %04x: P %d KB, C %d KB, S %d KB, V %d KB%s, M %d KB, BIOS %d KB -> %ld KB total\n",
+	       game.code, game.prom_size/1024, game.crom_size/1024, game.srom_size/1024,
+	       (game.vrom_size + game.vbrom_size)/1024, game.vbrom_size ? " (A+B split)" : "",
+	       game.mrom_size/1024, (bios.prom_size + bios.srom_size)/1024, total/1024);
+	if (total > 64L*1024*1024)
+		fprintf(stderr, "warning: ROM data is %ld MB; most flashcarts load at most 64 MB\n",
+		        total/(1024*1024));
 
 	strcpy(outfn+off, "?.bios");
 
