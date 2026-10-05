@@ -11,11 +11,12 @@
 // the linker places .rodata.* input sections file by file, so z80.o's
 // rodata starts MVS64_Z80_ANCHOR_PAD bytes after an 8 KB boundary no
 // matter what changes elsewhere. The pad is chosen so z80_hot lands where
-// it measured fast: offset 0x1CF0 in the 8 KB page (sets 463.., as in the
-// p22a build), with z80.o's jump tables just before it. z80_hot sits
-// 0xE30 bytes into z80.o's rodata, so pad = 0x1CF0 - 0xE30 = 0xEC0; if
-// z80.c's tables change, re-derive from nm (z80_hot - z80_rodata_anchor
-// - pad). Costs < 8 KB.
+// it measured fast. z80_hot sits 0x1230 bytes into z80.o's rodata (after
+// the jump tables, z80_run's included), so pad 0xEC0 puts it at offset
+// 0xF0 in the 8 KB page. In ares (Metal Slug, DET_AUDIO, 1687 frames) that
+// measured sound at 101% of a frame vs 104% at the previous spot, 0x1CF0
+// (pad 0xAC0). If z80.c's tables change, re-derive from nm (z80_hot -
+// z80_rodata_anchor - pad) and re-measure. Costs < 8 KB.
 #include <stdint.h>
 
 #ifndef MVS64_Z80_ANCHOR_PAD
