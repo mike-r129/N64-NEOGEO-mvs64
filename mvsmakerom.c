@@ -391,12 +391,99 @@ void load_bios(const char *fn, Bios *bios) {
 	fixrom_preprocess(bios->SROM, bios->srom_size);
 }
 
+void finish_game(Game *game);
+
+// Byteswap a P-ROM loaded as little-endian 16-bit words into 68k order, and
+// undo the swapped halves some single-file P-ROMs have.
+void prom_fixup(Game *game, bool single_file) {
+	byteswap(game->PROM, 2, game->PROM+1, 2, game->prom_size/2);
+	if (single_file && memcmp(game->PROM+game->prom_size/2+0x100, "NEO-GEO", 7)==0)
+		byteswap(game->PROM, 1, game->PROM+game->prom_size/2, 1, game->prom_size/2);
+	if (memcmp(game->PROM+0x100, "NEO-GEO", 7)) panic("error: cannot detect PROM layout\n");
+}
+
+static uint32_t rd32le(const uint8_t *p) {
+	return p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint8_t *dupmem(const uint8_t *p, uint32_t sz) {
+	uint8_t *d = malloc(sz ? sz : 1);
+	memcpy(d, p, sz);
+	return d;
+}
+
+// .neo (NeoSD / TerraOnion) single-file sets: a 4 KB header with the region
+// sizes (little-endian u32 at offset 4: P, S, M, V1, V2, C; NGH at 40), then
+// the regions in that order. P is in the same 16-bit word order as a MAME
+// P-ROM file, with the halves already in place; C is already interleaved
+// (C1/C2 byte pairs) and decrypted; V1 is the ADPCM-A ROM and V2, when
+// present, the separate ADPCM-B ROM.
+void load_game_neo(const uint8_t *neo, size_t size, Game *game) {
+	if (size < 4096 || memcmp(neo, "NEO\x01", 4))
+		panic("error: not a .neo file (bad header)\n");
+	uint32_t psz = rd32le(neo+4), ssz = rd32le(neo+8), msz = rd32le(neo+12);
+	uint32_t v1sz = rd32le(neo+16), v2sz = rd32le(neo+20), csz = rd32le(neo+24);
+	if ((uint64_t)4096 + psz + ssz + msz + v1sz + v2sz + csz > size)
+		panic("error: truncated .neo file\n");
+	if (!psz || !csz) panic("error: .neo file without P or C data\n");
+	if (!ssz) panic("error: .neo file without S data (not supported)\n");
+	if (csz % 128) panic("error: invalid .neo C size: %u\n", csz);
+
+	const uint8_t *p = neo + 4096;
+	game->PROM = dupmem(p, psz); game->prom_size = psz;      p += psz;
+	game->SROM = dupmem(p, ssz); game->srom_size = ssz;      p += ssz;
+	if (msz) { game->MROM = dupmem(p, msz); game->mrom_size = msz; }
+	p += msz;
+	if (v1sz) { game->VROM = dupmem(p, v1sz); game->vrom_size = v1sz; }
+	p += v1sz;
+	if (v2sz) {
+		if (!v1sz) panic("error: .neo file with ADPCM-B but no ADPCM-A data\n");
+		game->VBROM = dupmem(p, v2sz); game->vbrom_size = v2sz;
+	}
+	p += v2sz;
+	game->CROM = dupmem(p, csz); game->crom_size = csz;
+
+	prom_fixup(game, true);
+	game->code = ((int)game->PROM[0x108] << 8) | game->PROM[0x109];
+	finish_game(game);
+}
+
+static bool has_ext(const char *fn, const char *ext) {
+	size_t n = strlen(fn), e = strlen(ext);
+	if (n < e) return false;
+	for (size_t i = 0; i < e; i++)
+		if (tolower((unsigned char)fn[n-e+i]) != ext[i]) return false;
+	return true;
+}
+
 void load_game(const char *fn, Game *game) {
 	mz_zip_archive zip;
 	mz_zip_zero_struct(&zip);
 	memset(game, 0, sizeof(*game));
 
+	if (has_ext(fn, ".neo")) {
+		int sz;
+		uint8_t *neo = readall(fn, &sz);
+		load_game_neo(neo, sz, game);
+		free(neo);
+		return;
+	}
+
 	if (!mz_zip_reader_init_file(&zip, fn, 0)) panic("%s\n", mz_zip_get_error_string(mz_zip_get_last_error(&zip)));
+
+	// A zip holding a .neo file (as distributed for NeoSD carts).
+	for (int index = 0;; index++) {
+		mz_zip_archive_file_stat stat;
+		if (!mz_zip_reader_file_stat(&zip, index, &stat)) break;
+		if (stat.m_is_directory || !has_ext(stat.m_filename, ".neo")) continue;
+		size_t sz;
+		uint8_t *neo = mz_zip_reader_extract_to_heap(&zip, index, &sz, 0);
+		if (!neo) panic("%s\n", mz_zip_get_error_string(mz_zip_get_last_error(&zip)));
+		mz_zip_reader_end(&zip);
+		load_game_neo(neo, sz, game);
+		free(neo);
+		return;
+	}
 
 	Romset P, C, S, X, V, VB, M;
 
@@ -446,15 +533,9 @@ void load_game(const char *fn, Game *game) {
 	// Load PROMs
 	if (num_smas == 0) {
 		game->PROM = romset_load(&P, &zip, 0);
-		byteswap(game->PROM, 2, game->PROM+1, 2, P.total_size/2);
 		game->prom_size = P.total_size;
-
 		// In some cases, the single PROM has the two halves inverted.
-		if (num_proms == 1) {
-			if (memcmp(game->PROM+P.total_size/2+0x100, "NEO-GEO", 7)==0)
-				byteswap(game->PROM, 1, game->PROM+P.total_size/2, 1, P.total_size/2);
-		}
-		if (memcmp(game->PROM+0x100, "NEO-GEO", 7)) panic("error: cannot detect PROM layout\n");
+		prom_fixup(game, num_proms == 1);
 	} else {
 		game->PROM = romset_load(&P, &zip, ROMSET_OFFSET_1MIB);
 
@@ -510,6 +591,11 @@ void load_game(const char *fn, Game *game) {
 		game->mrom_size = M.total_size;
 	}
 
+	finish_game(game);
+}
+
+// Compact the graphics ROMs and convert them to the N64 4bpp format.
+void finish_game(Game *game) {
 	// Compact CROM
 	while (memcmp(game->CROM+game->crom_size-256, game->CROM+game->crom_size-128, 128) == 0)
 		game->crom_size -= 128;
@@ -537,7 +623,8 @@ int main(int argc, char *argv[]) {
 	if (argc < 3) {
 		fprintf(stderr, "MVS64 ROM conversion tool\n\n");
 		fprintf(stderr, "Usage:\n");
-		fprintf(stderr, "   mvsmakerom <bios> <game.zip>\n");
+		fprintf(stderr, "   mvsmakerom <bios> <game.zip>   (MAME romset, or a zip with a .neo file)\n");
+		fprintf(stderr, "   mvsmakerom <bios> <game.neo>\n");
 		fprintf(stderr, "\n");
 		fprintf(stderr, "Notes:\n");
 		fprintf(stderr, "  * <bios> must be a valid NeoGeo BIOS (original or homebrew)\n");
