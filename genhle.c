@@ -129,7 +129,7 @@ bool find_word_prefix(char *s, char *prefix, char *out) {
 // enough"; we approximate this with "emulated using the same function in the
 // interpreter".
 bool decode_duffdevice(unsigned char *rom, unsigned int pc, int *ddlen, int *ddstep) {
-	char disasm[256]; 
+	char disasm[256];
 
 	#define MAX_DD_STEP 4
 	uint16_t op[MAX_DD_STEP+1]; const opcode_handler_struct *oph[MAX_DD_STEP+1]; int oplen[MAX_DD_STEP+1];
@@ -180,7 +180,7 @@ bool find_perfect_hash(uint32_t *nums, int sz, uint32_t* ph_mul, uint32_t* ph_sh
 	*ph_mask |= *ph_mask >> 16;
 
 	// Increase the mask (and thus hash table size) until a certain upper bound (2**24)
-	for (;*ph_mask != 0x000FFFFF;*ph_mask = (*ph_mask<<1)|1) {	
+	for (;*ph_mask != 0x000FFFFF;*ph_mask = (*ph_mask<<1)|1) {
 		int nslots = *ph_mask+1;
 		bool slot_used[nslots];
 		// Try all primes
@@ -330,7 +330,7 @@ int main(int argc, char *argv[]) {
 			fprintf(out, "\t\tREG_PC = 0x%x;\n", pc+2);
 			fprintf(out, "\t\tUSE_CYCLES(%d);\n", oph->cycles[0]);
 			fprintf(out, "\t\tuint REG_IR = 0x%x;\n", be16(func));
-			if (oplen > 2) {		
+			if (oplen > 2) {
 				if (oplen & 1) panic("invalid odd opcode length: %d @ PC:%x", oplen, pc);
 				fprintf(out, "\t\tuint OPARG[] = { ");
 				for (int i=2;i<oplen;i+=2) fprintf(out, "0x%04x%s", be16(&func[i]), i==oplen-2 ? " " : ", ");
@@ -353,7 +353,7 @@ int main(int argc, char *argv[]) {
 					replace_word(body, "m68ki_branch_16(offset);", "", 1);
 					replace_word(body, "return;", goto_next, 1);
 				} else {
-					replace_word(body, "m68ki_branch_16(offset);", goto_next, 1);					
+					replace_word(body, "m68ki_branch_16(offset);", goto_next, 1);
 				}
 			} else if (stranyprefix(oph->opcode_handler, branches_off_8)) {
 				target = pc + 2 + (int8_t)op;
@@ -399,7 +399,7 @@ int main(int argc, char *argv[]) {
 					panic("unsupported jump table instruction: %s", disasm);
 			}
 			if (target > pc) hmput(forward_jumps, target, true);
-		
+
 			fprintf(out, "%s", body);
 
 			// If the function contains a jump or it's a subroutine call, it's
@@ -424,7 +424,7 @@ int main(int argc, char *argv[]) {
 			// FIXME: we might want to change this to treat all residual branches
 			// as jumps, and simply exit the HLE function.
 			} else if (strstr(body, "m68ki_branch_")) {
-				panic("unhandled branch in body -- recompiler bug\n");	
+				panic("unhandled branch in body -- recompiler bug\n");
 			}
 
 			// If the opcode body still contains a "return", it's a bug because we
@@ -481,7 +481,7 @@ int main(int argc, char *argv[]) {
 	printf("Generating hle_index.c...\n");
 
 	fprintf(out, "#include \"hle_index.h\"\n\n");
-	for (int i=0;i<hmlen(func_pcs);i++) 
+	for (int i=0;i<hmlen(func_pcs);i++)
 		if (func_pcs[i].key == func_pcs[i].value)
 			fprintf(out, "extern uint32_t func_%08X(m68ki_cpu_core *cpu, int *cycles, uint32_t pc);\n", func_pcs[i].value);
 

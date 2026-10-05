@@ -39,7 +39,7 @@
 
 // Set to 1 to emulate instructions that access memory across the
 // address space boundary (e.g. 0x00FFFFFF -> 0x00000000). The implementation
-// is not complete: specifically, it doesn't still handle single 32-bit 
+// is not complete: specifically, it doesn't still handle single 32-bit
 // accesses across the address space wrap-around (eg: 32-bit read at 0x00FFFFFE).
 #ifndef M64K_CONFIG_ADDR_WRAP
 #define M64K_CONFIG_ADDR_WRAP      0

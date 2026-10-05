@@ -69,7 +69,7 @@ void fixrom_preprocess(uint8_t *rom, int sz) {
 void crom_preprocess(uint8_t *rom0, int sz) {
 	uint8_t *buf0 = calloc(1, sz), *buf = buf0, *rom = rom0;
 	uint8_t *c1 = rom;
-	
+
 	for (int i=0;i<sz;i+=8*16) {
 		for (int b=0;b<4;b++) {
 			uint8_t *dst = buf + (b&1)*64 + ((b^2)&2)*2;
@@ -400,7 +400,7 @@ void load_game(const char *fn, Game *game) {
 		if (X.size[0] != 0x40000) panic("error: invalid SMA size: %d\n", X.size[0]);
 		if (!mz_zip_reader_extract_file_to_mem(&zip, X.fn[0], game->PROM + 0x0C0000, X.size[0], 0))
 			panic("%s\n", mz_zip_get_error_string(mz_zip_get_last_error(&zip)));
-		
+
 		game->prom_size = P.total_size + 1024*1024;
 		byteswap(game->PROM, 2, game->PROM+1, 2, game->prom_size/2);
 
@@ -428,15 +428,15 @@ void load_game(const char *fn, Game *game) {
 		game->SROM = romset_load(&S, &zip, 0);
 		game->srom_size = S.total_size;
 	} else {
-		cmc_decrypt(game);		
+		cmc_decrypt(game);
 	}
 
 	// Compact CROM
-	while (memcmp(game->CROM+game->crom_size-256, game->CROM+game->crom_size-128, 128) == 0) 
+	while (memcmp(game->CROM+game->crom_size-256, game->CROM+game->crom_size-128, 128) == 0)
 		game->crom_size -= 128;
 
 	// Compact SROM
-	while (memcmp(game->SROM+game->srom_size-64, game->SROM+game->srom_size-32, 32) == 0) 
+	while (memcmp(game->SROM+game->srom_size-64, game->SROM+game->srom_size-32, 32) == 0)
 		game->srom_size -= 32;
 
 	// Preprocess graphics ROMs to convert it into N64 4bpp format
@@ -485,7 +485,7 @@ int main(int argc, char *argv[]) {
 
 	if (game.prom_size > 1024*1024) {
 		outfn[off] = 'b';
-		saveto(game.PROM+1024*1024, game.prom_size-1024*1024, outfn);		
+		saveto(game.PROM+1024*1024, game.prom_size-1024*1024, outfn);
 	}
 
 	outfn[off] = 'c';

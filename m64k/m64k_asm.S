@@ -45,7 +45,7 @@ optable4:
     .long   op_negx,  op_lea,   op_clr,   op_lea,   op_neg,   op_lea,   op_not,   op_lea
     .long   op_pea,   op_lea,   op_tst,   op_lea, op_movem_mr,op_lea,   op_tbl4e, op_lea
 optable4e:
-    .long   op_unk,    op_unk,    op_unk,    op_unk,    op_trap,   op_link,   op_mvusp,  op_tbl4e7    
+    .long   op_unk,    op_unk,    op_unk,    op_unk,    op_trap,   op_link,   op_mvusp,  op_tbl4e7
     .long   op_jsr,    op_jsr,    op_jsr,    op_jsr,    op_jmp,    op_jmp,    op_jmp,    op_jmp
 optable4e7:
     .long   op_reset,  op_nop,    op_stop,   op_rte,    op_rtd,    op_rts,    op_trapv,  op_rtr
@@ -254,7 +254,7 @@ opshiftsmem:
 # Macros to store to the M68K memory space (after mapping).
 # These macros are meant to explicitly mark m68k memory space writes,
 # and to enforce the convention that all writes to the M68K memory space
-# must have the value to be stored in the "result" register. 
+# must have the value to be stored in the "result" register.
 # This simplifies the implementation of MMIO handlers.
 .macro sw_m68k reg, address
     .if (\reg != result)
@@ -323,7 +323,7 @@ _m64k_asmrun:
     sd s8,96(sp)
     sd ra,104(sp)
 
-    #if M64K_CONFIG_MEMORY_BASE == 0x00000000 
+    #if M64K_CONFIG_MEMORY_BASE == 0x00000000
     li mmap_mask, 0x00FFFFFF
     #else
     li mmap_mask, M64K_CONFIG_MEMORY_BASE
@@ -499,7 +499,7 @@ flush_sr:
     andi flag_x, 1
     sll t1, flag_x, 4
     or t0, t1
-    
+
     lw t1, M64K_OFF_SR(ctx)
     and t1, ~CCR_MASK
     or t1, t0
@@ -516,7 +516,7 @@ flush_sr_chstack:
 
     # Store the current stack pointer (A7) into USP/SSP
     # Return: t1 = SR
-flush_stack: 
+flush_stack:
     j flush_sr_chstack
     lw t1, M64K_OFF_SR(ctx)
 
@@ -525,7 +525,7 @@ flush_stack:
     # Also load the current stack pointer (A7) from USP/SSP
     # Input: t0: SR
     # Destroy: t0, t1, t2
-reload_sr: 
+reload_sr:
     # Extract flags from SR into flag_nv / flag_zc
     # SR Format: ---X NZVC
     srl flag_x, t0, 4          # X to bit 0
@@ -533,7 +533,7 @@ reload_sr:
 
     sll t1, t0, 28         # N to bit 31 (and 63)
     dsll flag_nv, t0, 62   # V to bit 63 (and 0 to 31)
-    xor flag_nv, t1       
+    xor flag_nv, t1
 
     andi t1, t0, 4         # Isolate Z
     xori t1, 4             # !Z
@@ -552,7 +552,7 @@ reload_sr_chstack:
     jr ra
     nop
 
-reload_stack: 
+reload_stack:
     j reload_sr_chstack
     lw t0, M64K_OFF_SR(ctx)
 
@@ -569,14 +569,14 @@ reload_stack:
 # write happens to cause an address error, the address register is
 # supposedely not incremented yet, but in our interpreter we raise
 # the address error after the increment has happened.
-# 
+#
 # So in general, we need to perform several fixups here, including
 # instruction-specific ones. We don't care if this is slow as
 # address errors are *extremely* rare in 68000 code, so it is a super
 # cold path.
 
 #if M64K_CONFIG_ADDRERR
-    .data 
+    .data
     # Table to help setting up address error. Each entry is the PC offset to rollback.
 addrerr_pcoff:  .byte  0,  0, -2, -2, -2, -2, -2,  0
 addrerr7_pcoff: .byte -2, -2, -2, -2,  0,  0,  0,  0
@@ -655,7 +655,7 @@ addrerr_finish:
 1:  sw_ctx t0, M64K_OFF_PENDINGEXC+8    # Store FC
 
     # Check if we need fixups
-    andi t0, opcode, 0xF138              
+    andi t0, opcode, 0xF138
     beq t0, 0xD108, addrerr_fixup_addq  # Fixup for ADDX pre-decrement
     beq t0, 0x9108, addrerr_fixup_addq  # Fixup for SUBX pre-decrement
     andi t0, opcode, 0xFFC0
@@ -766,7 +766,7 @@ addrerr_fixup_move_wordabs: # (xxx).W
 addrerr_fixup_move_longabs: # (xxx).L
     addi m_pc, -4
 
-    # Check source EA. It has an impact has the (xxx.L) decoding of dest 
+    # Check source EA. It has an impact has the (xxx.L) decoding of dest
     # is partly overlap to EA source. We check for the source EA mode
     # that don't access memory.
     andi t0, opcode, 0x38
@@ -819,7 +819,7 @@ addrerr_fixup_movem_mr:
     beqz t0, main_loop_exit              # if word, no fixup
     andi t0, opcode, 7<<3                # check if EA mode is post-increment
     bne t0, 3<<3, main_loop_exit         # otherwise, no fixup
-    
+
     andi t0, opcode, 7
     sll t0, 2
     lw_ctx t1, M64K_OFF_AREGS,t0        # Revert the post-increment
@@ -934,7 +934,7 @@ ea7_table:
     .text
     .set reorder
 
-     # Decode EA. opsize must be set to 1, 2 or 4. 
+     # Decode EA. opsize must be set to 1, 2 or 4.
      # When 0, extracts from opcode
 ALIGN(decode_ea):
     andi t1, opcode, 0x7
@@ -1254,10 +1254,10 @@ OP(add):
 op_add_rmwimpl:
     daddu result, t0, t1
 op_add_rmwimpl_flags:
-    dsll flag_zc, result, rmw_bitsize 
+    dsll flag_zc, result, rmw_bitsize
     dsrl flag_x, flag_zc, 32
-    sllv t0, t0, rmw_bitsize 
-    sllv t1, t1, rmw_bitsize 
+    sllv t0, t0, rmw_bitsize
+    sllv t1, t1, rmw_bitsize
     daddu flag_nv, t0, t1
     jr ra
 
@@ -1276,10 +1276,10 @@ OP(sub):
 op_sub_rmwimpl:
     dsubu result, t1, t0
 op_sub_rmwimpl_flags:
-    dsll flag_zc, result, rmw_bitsize 
+    dsll flag_zc, result, rmw_bitsize
     dsrl flag_x, flag_zc, 32
-    sllv t0, t0, rmw_bitsize 
-    sllv t1, t1, rmw_bitsize 
+    sllv t0, t0, rmw_bitsize
+    sllv t1, t1, rmw_bitsize
     dsubu flag_nv, t1, t0
     jr ra
 
@@ -1335,8 +1335,8 @@ op_addx_rmwimpl:
     dsll flag_zc, result, rmw_bitsize    # compute new flag_zc
     or flag_zc, t2                       # combine with old Z flag
     sllv t0, t0, rmw_bitsize             # put operands into MSB
-    sllv t1, t1, rmw_bitsize 
-    sllv flag_x, flag_x, rmw_bitsize 
+    sllv t1, t1, rmw_bitsize
+    sllv flag_x, flag_x, rmw_bitsize
     daddu flag_nv, t0, t1                # compute flag_nv
     daddu flag_nv, flag_x
     dsrl flag_x, flag_zc, 32             # copy new carry bit into flag_x
@@ -1349,8 +1349,8 @@ OP(subx_rmwimpl):
     dsll flag_zc, result, rmw_bitsize    # compute new flag_zc
     or flag_zc, t2                       # combine with old Z flag
     sllv t0, t0, rmw_bitsize             # put operands into MSB
-    sllv t1, t1, rmw_bitsize 
-    sllv flag_x, flag_x, rmw_bitsize 
+    sllv t1, t1, rmw_bitsize
+    sllv flag_x, flag_x, rmw_bitsize
     dsubu flag_nv, t1, t0                # compute flag_nv
     dsubu flag_nv, flag_x
     dsrl flag_x, flag_zc, 32             # copy new carry bit into flag_x
@@ -1405,7 +1405,7 @@ op_sbcd_rmwimpl:
     or flag_zc, result
     dsll t0, flag_x, 32
     or flag_zc, t0
-    jr ra    
+    jr ra
 
 OP(suba):
     li result, 1
@@ -1451,9 +1451,9 @@ OP(cmp):
     j op_group_logical
 op_cmp_rmwimpl:
     dsubu result, t1, t0
-    dsll flag_zc, result, rmw_bitsize 
-    sllv t0, t0, rmw_bitsize 
-    sllv t1, t1, rmw_bitsize 
+    dsll flag_zc, result, rmw_bitsize
+    sllv t0, t0, rmw_bitsize
+    sllv t1, t1, rmw_bitsize
     dsubu flag_nv, t1, t0
     j main_loop               # skip rmw writeback
 
@@ -1495,7 +1495,7 @@ OP(cmpm):
 1:  srl t1, opcode, 7                 # extract Ax*4
     andi t1, 7<<2
     jal ea_011                        # calculate EA as post-increment
-    lax rmw_op, op_cmp_rmwimpl        
+    lax rmw_op, op_cmp_rmwimpl
     j rmw_no_ea                       # do rmw
 
 OP(mul):
@@ -1590,7 +1590,7 @@ op_divs_exec:
     sll t2, t0, 16
     sra t2, 16
 op_div_finish:
-    bne t0, t2, op_div_overflow 
+    bne t0, t2, op_div_overflow
     mfhi t1
     zx64 flag_zc, t0
     sll flag_nv, t0, 16
@@ -1633,7 +1633,7 @@ OP(and):
     j op_group_logical
 op_and_rmwimpl:
     and result, t0, t1
-    sllv flag_nv, result, rmw_bitsize 
+    sllv flag_nv, result, rmw_bitsize
     zx64 flag_zc, flag_nv
     jr ra
 
@@ -1657,7 +1657,7 @@ OP(or):
     j op_group_logical
 op_or_rmwimpl:
     or result, t0, t1
-    sllv flag_nv, result, rmw_bitsize 
+    sllv flag_nv, result, rmw_bitsize
     zx64 flag_zc, flag_nv
     jr ra
 
@@ -1673,7 +1673,7 @@ OP(eor):
     j op_group_logical
 op_eor_rmwimpl:
     xor result, t0, t1
-    sllv flag_nv, result, rmw_bitsize 
+    sllv flag_nv, result, rmw_bitsize
     zx64 flag_zc, flag_nv
     jr ra
 
@@ -1685,7 +1685,7 @@ OP(not):
     j rmw_eadst
 op_not_rmwimpl:
     not result, t1
-    sll flag_nv, result, rmw_bitsize 
+    sll flag_nv, result, rmw_bitsize
     zx64 flag_zc, flag_nv
     jr ra
 
@@ -1866,7 +1866,7 @@ OP(ror_rmwimpl): # t1=register, t2=shift amount
 1:  jr ra
 
 OP(roxr_rmwimpl): # t1=register, t2=shift amount
-    andi opcode, 0xFFFF^(1<<8)          # clear direction bit again (it was turned on in rmw_eadst) 
+    andi opcode, 0xFFFF^(1<<8)          # clear direction bit again (it was turned on in rmw_eadst)
 OP(roxl_rmwimpl): # t1=register, t2=rotate amount
     andi flag_x, 1
     dsll t0, flag_x, 32                 # move input carry (from X) to bit 32
@@ -1883,7 +1883,7 @@ OP(roxl_rmwimpl): # t1=register, t2=rotate amount
     neg t2
 1:  addi opsize, 2                      # opsize = 9,17,33 for b,w,l
     bgtz t2, 1f                         # adjust remainder if negative or zero
-    add t2, opsize                      # t2 = 1..9 = shift-left amount 
+    add t2, opsize                      # t2 = 1..9 = shift-left amount
 1:  sub t3, opsize, t2                  # t3 = 8..0 = shift-right amount
     dsllv t0, t1, t2                    # shift left
     dsrlv t1, t1, t3                    # shift right
@@ -2295,10 +2295,10 @@ movem_rm_impl_32:
 
     #undef movem_mask
     #undef movem_op
-    #undef ea_reg        
-    #undef reg_ptr       
-    #undef reg_incr      
-    #undef eaptr32_diff  
+    #undef ea_reg
+    #undef reg_ptr
+    #undef reg_incr
+    #undef eaptr32_diff
     #undef ctz_lut
     #undef reg_incr_3x
 
@@ -2547,8 +2547,8 @@ jmp_exec:
     subu t0, eaptr32, m_pc             # save new pc_diff
     sw t0, pc_diff
     check_addr_error eaptr32, pc_address_error
-    beq m_pc, 0xFF001FE2, idle_skip    
-    beq m_pc, 0xFFC18714, idle_skip    
+    beq m_pc, 0xFF001FE2, idle_skip
+    beq m_pc, 0xFFC18714, idle_skip
     j main_loop
 idle_skip:
     li m_cycles, 0
@@ -2583,7 +2583,7 @@ bsr_exec:
     andi opcode, 0xFF00                # avoid timing adjustment made by jmp_exec_cycles later
     #endif
     lw eaptr32, pc_diff                # calculate full 32bit branch target (using pc_diff)
-    addu eaptr32, t3                   
+    addu eaptr32, t3
     addu eaptr32, m_pc
     j jsr_exec
 
@@ -2614,7 +2614,7 @@ bcc_exec:
     .set reorder
 branch_exec:
     lw eaptr32, pc_diff                # calculate full 32bit branch target (using pc_diff)
-    addu eaptr32, t3                   
+    addu eaptr32, t3
     addu eaptr32, m_pc
     use_cycles 10
     j jmp_exec
@@ -2717,7 +2717,7 @@ cc_vc: # overflow clear (V == 0)
     xor t0, t1
     seq t0, t2
     jr ra
-cc_ge: # greater equal (N == V) 
+cc_ge: # greater equal (N == V)
     sge t0, flag_nv, zero
     xor t0, t2
     jr ra
@@ -2836,14 +2836,14 @@ bits_impl:  # First part is common to all bit operations
      use_cycles -2               # bchg/bclr/bset: 2 cycles less if bitindex < 16
 1:  .set reorder
     #endif
-    li t2, 1                        
+    li t2, 1
     sllv t2, t2, t0              # t2 = 1 << bitindex
     and t3, t2, t1               # t3 = value & (1 << bitindex)
     or flag_zc, t3               # set Z flag with current bit value
     jr rmw_op                    # jump to bitop function
 bittable:
     use_cycles -4                # btst: no writeback necessary
-    j main_loop            
+    j main_loop
     xor result, t1, t2           # bchg: result = value ^ (1 << bitindex)
     jr ra
     xor result, t1, t3           # bclr: result = value ^ (value & (1 << bitindex))
@@ -2868,12 +2868,12 @@ movep_wreg:
     lbu_m68k t0, eaptr           # read memory
     addiu opsize, -2
     sb t0, 0(dptr)               # write register
-    lb t0, 2(eaptr)              
+    lb t0, 2(eaptr)
     sb t0, 1(dptr)
     beqz opsize, main_loop
-    lb t0, 4(eaptr)              
+    lb t0, 4(eaptr)
     sb t0, 2(dptr)
-    lb t0, 6(eaptr)              
+    lb t0, 6(eaptr)
     sb t0, 3(dptr)
     use_cycles 8
     j main_loop

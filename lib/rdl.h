@@ -11,7 +11,7 @@
 // maximized.
 //
 // To implement immediate mode:
-// 
+//
 //    1) Allocate a large display list once, possibly with rdl_heap_alloc().
 //    2) At the beginning of each frame, reset the display list with
 //       rdl_reset() and start pushing it to the RPD with rdl_exec().
@@ -22,7 +22,7 @@
 //
 // During debugging, compile with asserts enabled so that rdl_push() will assert
 // if the display list is not large enough.
-// 
+//
 // Retained mode
 // *************
 // Every "graphic object" in the scene has its own display list. To draw the
@@ -69,7 +69,7 @@
 
 // A RDP display list. This is a linear container of RDP primitives that can be
 // sent to RDP for asynchronous execution.
-// 
+//
 // NOTE: Do not access the structure fields directly. The fields are not part of
 // the public API and might go away at any point. Use the rdl_* functions/macros
 // to inspect or modify a display list.
@@ -268,8 +268,8 @@ RdpDisplayList* rdl_grow_for(RdpDisplayList *rdl, int nprims);
 // This function adds a RDP Pipe Sync primitive to the RDP display list and
 // then flushes the display list from the CPU cache, so that it is ready for
 // execution with rdl_exec().
-// 
-// If the display list is already being executed (through rdl_exec()), this 
+//
+// If the display list is already being executed (through rdl_exec()), this
 // function notifies the RDP that new primitives have been added to the same
 // list, so that the RDP can process them.
 //
@@ -301,8 +301,8 @@ void rdl_exec(RdpDisplayList *rdl);
 ////////////////////////////////////////////////////////////////////////////////
 // High-level graphic objects
 ////////////////////////////////////////////////////////////////////////////////
-// 
-// The following functions implement higher-level graphic objects, made 
+//
+// The following functions implement higher-level graphic objects, made
 // of multiple graphic primitives. They are easier to use that the low-level RDP
 // graphic primitives, but less flexible in exploiting all hardware features.
 //
@@ -339,7 +339,7 @@ void rdl_exec(RdpDisplayList *rdl);
 //   [ ... later ...]
 //
 //   rdl_sprite_move(rdl, off2, 350, 200);  // move the second object
-// 
+//
 ////////////////////////////////////////////////////////////////////////////////
 
 ///////////////////////////////////

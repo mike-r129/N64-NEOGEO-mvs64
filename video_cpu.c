@@ -21,7 +21,7 @@ static void draw_sprite_fix(int spritenum, int palnum, int x, int y) {
 }
 
 static void render_begin_sprites(void) {
-	if (!hscale_init) {	
+	if (!hscale_init) {
 		const uint64_t hbits = 0x5b1d7f39a06e2c48ull;
 		memset(hscale, 0, 16*16);
 		for (int y=0;y<16;y++)
@@ -35,7 +35,7 @@ static void render_end_sprites(void) {}
 
 
 static void draw_sprite(int spritenum, int palnum, int x0, int y0, int sw, int sh, bool flipx, bool flipy) {
-	const int w = 16, h = 16; 
+	const int w = 16, h = 16;
 	uint8_t *src = crom_get_sprite(spritenum);
 	uint16_t *pal = PALETTE_RAM_EMU + palnum*16;
 
@@ -94,4 +94,3 @@ static void render_begin(void) {
 }
 
 static void render_end(void) {}
-

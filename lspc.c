@@ -23,7 +23,7 @@ static void lspc_vram_addr_w(uint32_t val) {
 		reg_vram_mask = 0x7FFF;
 	} else {
 		reg_vram_bank = VIDEO_RAM + 0x8000;
-		reg_vram_mask = 0x7FF;		
+		reg_vram_mask = 0x7FF;
 	}
 
 	reg_vram_addr = val & reg_vram_mask;
@@ -55,7 +55,7 @@ static void lspc_vblank(void) {
 	if (lspc_aa_tick == 0) {
 		lspc_aa_tick = reg_lspcmode >> 8;
 		lspc_aa_counter++;
-	} else 
+	} else
 		--lspc_aa_tick;
 }
 
@@ -63,4 +63,3 @@ bool lspc_get_auto_animation(uint8_t *value) {
 	*value = lspc_aa_counter & 7;
 	return !(reg_lspcmode & (1<<3));
 }
-

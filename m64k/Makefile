@@ -31,7 +31,7 @@ $(BUILD_DIR)/m64k_testsuite.dfs: $(assets_conv)
 $(BUILD_DIR)/m64k_testsuite.elf: $(src:%.c=$(BUILD_DIR)/%.o) $(asm:%.S=$(BUILD_DIR)/%.o)
 
 m64k_testsuite.z64: N64_ROM_TITLE="M64K Testsuite"
-m64k_testsuite.z64: $(BUILD_DIR)/m64k_testsuite.dfs 
+m64k_testsuite.z64: $(BUILD_DIR)/m64k_testsuite.dfs
 
 emu: m64k_testsuite.z64
 	$(N64EMU) m64k_testsuite.z64

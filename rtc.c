@@ -28,7 +28,7 @@ static void rtc_clock_w(uint8_t x) {
 static void rtc_stb_w(uint8_t x) {
 	if (x) {
 		switch (reg_rtc_cmd) {
-			case 8: 
+			case 8:
 				debugf("[RTC] set TP mode: 1 sec\n");
 				rtc_event_period = MVS_CLOCK;
 				emu_change_event(rtc_event_id, emu_clock() + rtc_event_period/2);

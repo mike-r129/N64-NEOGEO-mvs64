@@ -10,13 +10,13 @@ static void rsp_fix_init(void) {
 	rspq_write(RSP_OVL_ID, 0x0);
 }
 static void rsp_fix_draw(uint8_t *src, int palnum, int x, int y) {
-	rspq_write(RSP_OVL_ID, 0x1, PhysicalAddr(src), 
+	rspq_write(RSP_OVL_ID, 0x1, PhysicalAddr(src),
 		(palnum << 20) | (x << 10) | y);
 }
 static void rsp_sprite_draw(uint8_t *src, int palnum, int x0, int y0, int sw, int sh, bool flipx, bool flipy) {
 	assertf(sw <= 16 && sh <= 16, "sprite too large: %dx%d", sw, sh);
 	assertf(sw > 0 && sh > 0, "sprite too small: %dx%d", sw, sh);
-	rspq_write(RSP_OVL_ID, 0x2, PhysicalAddr(src), 
+	rspq_write(RSP_OVL_ID, 0x2, PhysicalAddr(src),
 		(palnum << 24) | ((x0 & 0xFFF) << 12) | (y0 & 0xFFF),
 		(sw-1) | ((sh-1) << 4) | (flipx ? 0x100 : 0) | (flipy ? 0x200 : 0));
 }
@@ -117,7 +117,7 @@ static void draw_sprite(int spritenum, int palnum, int x0, int y0, int sw, int s
 		if (!rdp_mode_copy) {
 			rdpq_set_mode_copy(true);
 			rdpq_mode_tlut(TLUT_RGBA16);
-			rdp_mode_copy = true;			
+			rdp_mode_copy = true;
 		}
 
 		rdpq_texture_rectangle_raw(

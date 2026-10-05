@@ -97,7 +97,7 @@ RSPQ_EndSavedState
 
     .data
     .align 4
-VPALCONST: 
+VPALCONST:
     .half 0x0F00
     .half 0x00F0
     .half 0x000F
@@ -214,7 +214,7 @@ pal_loop:
 
     j RSPQ_Loop
     nop
-    
+
     .endfunc
 
 
@@ -317,7 +317,7 @@ check_palette_load:
     # Copy the palette set sequence into the rdpq staging buffer (16 bytes)
     sqv vpaletteset0,  0,s3
     sqv vpaletteset1, 16,s3
-    
+
     # Store the updated palette number into the SET_TILE command
     lw t0, 20(s3)
     or t0, t1
@@ -357,10 +357,10 @@ fix_draw:
     #under vspriteload1
     #under vpaletteset0
     #under vpaletteset1
-    #under vfixdraw    
+    #under vfixdraw
     #under last_palette
-    #under ypos        
-    #under xpos        
+    #under ypos
+    #under xpos
 
 
 #########################################################################
@@ -559,7 +559,7 @@ sprite_draw:
 1:  blt rect_y0, t0, 2f
     nop
     addi rect_y0, -512
-2:  
+2:
 
     andi rect_sw, a2, 0xF
     srl rect_sh, a2, 4
@@ -570,7 +570,7 @@ sprite_draw:
     sll rect_dt, rect_sh, 1
     lhu rect_ds, %lo(SCALE_FACTORS)(rect_ds)
     lhu rect_dt, %lo(SCALE_FACTORS)(rect_dt)
-   
+
     # Handle negative rectangle positions
     bgez rect_x0, 1f
     li rect_s0, 0
