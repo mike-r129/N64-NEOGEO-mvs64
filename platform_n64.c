@@ -431,6 +431,7 @@ void plat_audio_pump(void) {
 #endif
 #ifdef MVS64_DET_AUDIO
     pass_budget = 1000000;              // the det quantum is the only limit
+    int det_done = 0;                   // samples generated toward det_samples
 #endif
 
     // Top the ring up toward TARGET_LEAD. The ISR consumes exactly n frames
@@ -441,8 +442,14 @@ void plat_audio_pump(void) {
 #ifdef MVS64_RSPWP
         lead += (uint32_t)wp_pending_n;   // deferred buffer counts as staged
 #endif
+        int chunk = n;
 #ifdef MVS64_DET_AUDIO
-        if (filled * n >= det_samples) break;   // fixed guest quantum
+        // Fixed guest quantum: exactly det_samples per pump, in passes of at
+        // most one AI buffer. (Generating whole n-frame buffers here made
+        // every pump produce one AI buffer, ~2.4 frames of audio: DET builds
+        // ran the sound machine ~2.4x faster than the guest, inflating snd%.)
+        if (det_done >= det_samples) break;
+        if (det_samples - det_done < chunk) chunk = det_samples - det_done;
         (void)lead; (void)TARGET_LEAD;
 #else
         if (lead + (uint32_t)n > TARGET_LEAD) break;   // topped up
@@ -451,17 +458,20 @@ void plat_audio_pump(void) {
         wp_publish();          // free the staging buffer before reusing it
 #endif
         uint32_t snd_t0 = TICKS_READ();
-        sound_gen_samples(stage, n);
+        sound_gen_samples(stage, chunk);
         profile_snd += TICKS_DISTANCE(snd_t0, TICKS_READ());
 #ifdef MVS64_RSPWP
-        wp_pending_n = n;      // defer the publish to the next pump entry
+        wp_pending_n = chunk;  // defer the publish to the next pump entry
 #else
 #ifdef MVS64_DET_AUDIO
-        if (aring_wr - aring_rd + (uint32_t)n <= ARING_FRAMES)
-            aring_push(stage, n);       // else drop: host-side loss only
+        if (aring_wr - aring_rd + (uint32_t)chunk <= ARING_FRAMES)
+            aring_push(stage, chunk);   // else drop: host-side loss only
 #else
-        aring_push(stage, n);
+        aring_push(stage, chunk);
 #endif
+#endif
+#ifdef MVS64_DET_AUDIO
+        det_done += chunk;
 #endif
         filled++;
     }
