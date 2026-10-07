@@ -157,6 +157,7 @@ Most are enabled with `EXTRA_DEFINES=-D<name>`.
 | `MVS64_FBCRC` | Hash of every finished frame (`[FBCRC]`), for pixel-exact A/B comparisons |
 | `TRCRC_ON=1` (make option) | Hash of the 68000 state per frame (`[TRCRC]`), for execution-exact A/B comparisons |
 | `MVS64_DET_AUDIO` | Generate exactly one frame of audio per frame, so that runs of builds with different speeds stay comparable |
+| `MVS64_ACRC` (with `MVS64_DET_AUDIO`) | Hash of the generated audio (`[ACRC]`, per 60 buffers and running), for sound-exact A/B comparisons such as a Z80 core swap |
 | `MVS64_Z80TRACE` (PC build) | Record everything the sound code does to the Z80 for a stretch of audio (env `MVS64_Z80TRACE=<file>`, `_AT`, `_LEN` in seconds), for replaying through another Z80 core; see [tools/z80trace-format.md](tools/z80trace-format.md) |
 
 The scripts in `tools/` compare and summarize these logs; see
@@ -214,7 +215,8 @@ Changes in this fork are checked against builds without them:
   change that should not alter them.
 - **N64:** builds with `TRCRC_ON=1`, `MVS64_FBCRC` and `MVS64_DET_AUDIO` must
   produce the same 68000 state and framebuffer hashes with a switch on and
-  off; `tools/trcdiff.sh` and `tools/compare-fbcrc.py` compare two logs.
+  off; `tools/trcdiff.sh` and `tools/compare-fbcrc.py` compare two logs. For
+  sound, add `MVS64_ACRC`: the `[ACRC]` lines must match too.
 
 ### Compatibility
 

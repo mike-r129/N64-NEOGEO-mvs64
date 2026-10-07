@@ -277,6 +277,39 @@ uint32_t perf_snd_pub;         // publish cost this frame (blocking finish +
                                // Stays defined without RSPWP (always 0 then).
 #endif
 
+#ifdef MVS64_ACRC
+#ifndef MVS64_DET_AUDIO
+#error "MVS64_ACRC needs MVS64_DET_AUDIO (otherwise the buffers depend on wall time)"
+#endif
+// [ACRC]: CRC-32 of every finished audio buffer, the N64 gate for swapping
+// the Z80 core. Under DET_AUDIO + INPUT, builds whose Z80 and YM2610 behave
+// identically print identical streams: per 60 buffers the CRC of those
+// buffers and the running CRC of all of them.
+static uint32_t acrc_int = 0xFFFFFFFF, acrc_run = 0xFFFFFFFF;
+static unsigned long acrc_n;
+static uint32_t acrc_upd(uint32_t c, const uint8_t *p, size_t len) {
+    static const uint32_t t[16] = {
+        0x00000000, 0x1DB71064, 0x3B6E20C8, 0x26D930AC, 0x76DC4190, 0x6B6B51F4,
+        0x4DB26158, 0x5005713C, 0xEDB88320, 0xF00F9344, 0xD6D6A3E8, 0xCB61B38C,
+        0x9B64C2B0, 0x86D3D2D4, 0xA00AE278, 0xBDBDF21C };
+    while (len--) {
+        c = (c >> 4) ^ t[(c ^ *p) & 15];
+        c = (c >> 4) ^ t[(c ^ (*p++ >> 4)) & 15];
+    }
+    return c;
+}
+static void acrc_add(const int16_t *buf, int frames) {
+    size_t len = (size_t)frames * 2 * sizeof(int16_t);
+    acrc_int = acrc_upd(acrc_int, (const uint8_t *)buf, len);
+    acrc_run = acrc_upd(acrc_run, (const uint8_t *)buf, len);
+    if (++acrc_n % 60 == 0) {
+        plat_log("[ACRC] n=%lu crc=%08lx run=%08lx\n", acrc_n,
+                 (unsigned long)~acrc_int, (unsigned long)~acrc_run);
+        acrc_int = 0xFFFFFFFF;
+    }
+}
+#endif
+
 #ifdef MVS64_RSPWP
 // Cross-pump output deferral (whole-pump offload).
 // sound_gen_samples() now returns with its tail RSP chunks still in flight;
@@ -295,6 +328,9 @@ static void wp_publish(void) {
     t0 = TICKS_READ();
     YM2610_wp_finish();        // usually instant: the RSP had the whole window
     profile_snd += TICKS_DISTANCE(t0, TICKS_READ());
+#ifdef MVS64_ACRC
+    acrc_add(stage, wp_pending_n);   // final now
+#endif
 #ifdef MVS64_DET_AUDIO
     // det-quantum generation can outrun the wall-rate reader: drop instead
     // of overwriting unread frames (host-side loss only; see pump comment).
@@ -463,6 +499,9 @@ void plat_audio_pump(void) {
 #ifdef MVS64_RSPWP
         wp_pending_n = chunk;  // defer the publish to the next pump entry
 #else
+#ifdef MVS64_ACRC
+        acrc_add(stage, chunk);
+#endif
 #ifdef MVS64_DET_AUDIO
         if (aring_wr - aring_rd + (uint32_t)chunk <= ARING_FRAMES)
             aring_push(stage, chunk);   // else drop: host-side loss only
