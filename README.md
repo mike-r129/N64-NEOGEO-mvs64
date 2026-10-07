@@ -36,7 +36,7 @@ only Samurai Shodown II (`samsho2`) has been tested with the changes below.
 | Area | Changes |
 | --- | --- |
 | Fixes | A build that works with current libdragon, 68000 exceptions (CHK, STOP, illegal and privileged instructions) and a BCLR/BSET bug that corrupted BIOS state, the memory-card bank, TLB faults in branch delay slots, TLB cache coherency, deterministic sprite-cache eviction, and an idle-skip compare that never matched |
-| Sound | Z80 core (superzazu/z80) and YM2610 (MAME-derived, integer-only), the 68000 command and reply latches, ROM conversion that splits the ADPCM-A and ADPCM-B sample ROMs, and an interrupt-fed audio ring on N64 |
+| Sound | Z80 core (superzazu/z80, plus the optional N64-Z80 MIPS core in `n64z80/`) and YM2610 (MAME-derived, integer-only), the 68000 command and reply latches, ROM conversion that splits the ADPCM-A and ADPCM-B sample ROMs, and an interrupt-fed audio ring on N64 |
 | RSP audio | FM and ADPCM synthesis on the RSP (`rsp_fm.S`, `rsp_audio.S`) with the channel state kept on the RSP between chunks, plus fixes for two libdragon rspq races this load exposes |
 | Video | Empty-tile skipping for sprites and the fix layer, a direct C-ROM tile table, a 2-word RSP sprite command, triple buffering, palette conversion only when the palette changes, and a larger tile cache with the Expansion Pak |
 | 68000 (m64k) | No per-instruction interrupt poll, per-game idle skip, inline fast paths for the hottest instructions, video-port stores without a trap, fused DBF copy/fill loops, and the core's hot code and data pinned to fixed cache sets |
@@ -121,6 +121,7 @@ Add these to the `make mvs64` command line:
 | `WP_OFF=1`, `ADPCM_CPU=1 WP_OFF=1` | Turn off the RSP whole-pump audio offload, or all RSP audio |
 | `FP_OFF=1`, `BLOCKOPS_OFF=1`, `PORTSTORE_OFF=1` | Turn off the 68000 fast paths, the fused DBF copy/fill loops, or the inline video-port stores (for A/B tests) |
 | `MUSASHI=1` | Use the portable Musashi 68000 core instead of m64k (much slower; for isolating m64k bugs) |
+| `Z80_CORE=asm` | Use the N64-Z80 MIPS assembly Z80 core (`n64z80/`) instead of `z80.c`: the same sound bit for bit, the Z80 about 2.3x faster in game. The default stays `z80.c` until it has been tested on hardware |
 
 On the N64 controller, Z inserts a coin and C-up is the select button.
 
@@ -223,7 +224,7 @@ Changes in this fork are checked against builds without them:
 | Game | NGH | Boots | Gameplay | Sound | Notes |
 | --- | --- | --- | --- | --- | --- |
 | Samurai Shodown II | 063 | Yes | Yes | Yes | The test game: 60 fps attract in ares; fights about 42-50 fps on hardware |
-| Metal Slug | 201 | Yes | Yes | Yes | Tested from a `.neo` set. Plays on PC. In ares: about 31 fps in attract, but only about 10 fps in the first mission, where emulating its sound driver takes about 1.7 seconds of N64 time per second of audio, so sound falls behind real time and is muted by the overload governor. The driver keeps the Z80 busy about half the time (samsho2's: about 5%). No idle-skip entry: its main-loop wait counts its passes |
+| Metal Slug | 201 | Yes | Yes | Yes | Tested from a `.neo` set. Plays on PC. With `z80.c`, in ares: about 31 fps in attract, but only about 10 fps in the first mission, where emulating its sound driver takes about 1.7 seconds of N64 time per second of audio, so sound falls behind real time and is muted by the overload governor. With `Z80_CORE=asm`, in ares: about 48 fps in attract and 38 fps in the first mission, with sound in real time and no underruns. The driver keeps the Z80 busy about half the time (samsho2's: about 5%). No idle-skip entry: its main-loop wait counts its passes |
 
 Other games have not been tested since sound was added.
 
@@ -282,7 +283,9 @@ game and are not stored in the repository.
 - **MVS64** and the **m64k** 68000 core: Giovanni Bajo (rasky), MIT
   ([LICENSE](LICENSE)).
 - **Z80 core:** [superzazu/z80](https://github.com/superzazu/z80) by Nicolas
-  Allemand, MIT ([z80.LICENSE](z80.LICENSE)).
+  Allemand, MIT ([z80.LICENSE](z80.LICENSE)). The optional MIPS assembly core
+  in `n64z80/` is [N64-Z80](https://github.com/mike-r129/N64-Z80), MIT
+  ([n64z80/LICENSE](n64z80/LICENSE)).
 - **YM2610:** the MAME FM sound core by Jarek Burczynski and Tatsuyuki Satoh,
   by way of NJ's pspmvs ([ym2610/LICENSE.mame](ym2610/LICENSE.mame)). Note
   that its license is not MIT: redistributions may not be sold or used
