@@ -10,7 +10,31 @@
 #include "emu.h"
 #include "roms.h"
 #include "platform.h"
+#ifdef MVS64_Z80_ASM
+// The N64-Z80 MIPS core (n64z80/, make ... Z80_CORE=asm): same struct and
+// behaviour as z80.c, n64z80_ names.
+#include "n64z80/n64z80.h"
+#define z80_init    n64z80_init
+#define z80_step    n64z80_step
+#define z80_run     n64z80_run
+#define z80_gen_int n64z80_gen_int
+#define z80_gen_nmi n64z80_gen_nmi
+// The Z80 data read or written on every instruction, pinned next to the
+// core's own (Makefile.mvs64: its hot tables fill dcache page offsets
+// 0xEC0-0x198F, after m64k's context at 0x8C0-0xEBF): this block starts at
+// 0x1990 with the struct and the read page map, then the work RAM (which
+// wraps to 0x5E8), then the write map, whose only live line (pages
+// 0xF8-0xFF) lands on m64k's sets.
+static struct {
+	uint8_t pad[0x1990];
+	z80 cpu;
+	uintptr_t rmap[256];
+	uint8_t ram[0x800];
+	uintptr_t wmap[256];
+} z80_hot __attribute__((aligned(8192)));
+#else
 #include "z80.h"
+#endif
 #include "ym2610/ym2610.h"
 #include <string.h>
 #include <stdlib.h>
@@ -289,6 +313,13 @@ static void rmap_rebuild(void) {
 	for (int w = 0; w < 4; w++) rmap_fill(win_lo[w], win_hi[w], z80_bank[w]);
 	rmap_fill(0xF8, 0x100, z80_ram);
 	cpu.rmap = z80_rmap;
+#ifdef MVS64_Z80_ASM
+	// Work RAM writes are plain stores (z80_write would do just that);
+	// everything else still goes through z80_write.
+	for (unsigned p = 0; p < 256; p++)
+		z80_hot.wmap[p] = p >= 0xF8 ? (uintptr_t)z80_ram - 0xF800 : 0;
+	n64z80_set_wmap(z80_hot.wmap);
+#endif
 }
 
 static void switchbank(int bank, uint16_t port) {

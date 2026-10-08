@@ -1,0 +1,5 @@
+n64z80_asm.S is a bit-exact reimplementation of the reference core z80.c
+(superzazu/z80, Copyright (c) 2019 Nicolas Allemand, MIT License; see
+../z80.LICENSE), and n64z80_tables.h is generated from that file by
+N64-Z80's tools/gen_tables.py. The Z80 exercisers used to test the core (GPL)
+are not part of this repository.
