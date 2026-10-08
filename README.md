@@ -56,7 +56,7 @@ per-game settings or hardware that is not emulated yet.
 
 Each area was merged as its own pull request, one commit per change, with
 the test results in the commit messages; see the
-[closed pull requests](https://github.com/mike-r129/mvs64/pulls?q=is%3Apr+is%3Aclosed).
+[closed pull requests](https://github.com/mike-r129/N64-NEOGEO-mvs64/pulls?q=is%3Apr+is%3Aclosed).
 
 ### How to build
 
@@ -66,12 +66,12 @@ for libdragon ([libdragon-docker](https://github.com/anacierdem/libdragon-docker
 that will work on Windows (under WSL), Linux and Mac. First, follow the installation
 instructions of libdragon-docker if you haven't already.
 
-Once you have the docker container configured, clone mvs64:
+Once you have the docker container configured, clone this repository:
 
-	$ git clone https://github.com/mike-r129/mvs64
-	$ cd mvs64
+	$ git clone https://github.com/mike-r129/N64-NEOGEO-mvs64
+	$ cd N64-NEOGEO-mvs64
 
-Start the docker container in the mvs64 directory:
+Start the docker container in the cloned directory:
 
 	$ libdragon start
 
