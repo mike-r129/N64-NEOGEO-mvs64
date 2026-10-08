@@ -121,7 +121,7 @@ Add these to the `make mvs64` command line:
 | `WP_OFF=1`, `ADPCM_CPU=1 WP_OFF=1` | Turn off the RSP whole-pump audio offload, or all RSP audio |
 | `FP_OFF=1`, `BLOCKOPS_OFF=1`, `PORTSTORE_OFF=1` | Turn off the 68000 fast paths, the fused DBF copy/fill loops, or the inline video-port stores (for A/B tests) |
 | `MUSASHI=1` | Use the portable Musashi 68000 core instead of m64k (much slower; for isolating m64k bugs) |
-| `Z80_CORE=asm` | Use the N64-Z80 MIPS assembly Z80 core (`n64z80/`) instead of `z80.c`: the same sound bit for bit, the Z80 about 2.3x faster in game. The default stays `z80.c` until it has been tested on hardware |
+| `Z80_CORE=c` | Use the portable `z80.c` Z80 core instead of the default N64-Z80 MIPS assembly core (`n64z80/`). Both give the same sound bit for bit; the assembly core is about 2.3x faster in game and was tested on hardware |
 
 On the N64 controller, Z inserts a coin and C-up is the select button.
 
@@ -224,7 +224,7 @@ Changes in this fork are checked against builds without them:
 | Game | NGH | Boots | Gameplay | Sound | Notes |
 | --- | --- | --- | --- | --- | --- |
 | Samurai Shodown II | 063 | Yes | Yes | Yes | The test game: 60 fps attract in ares; fights about 42-50 fps on hardware |
-| Metal Slug | 201 | Yes | Yes | Yes | Tested from a `.neo` set. Plays on PC. With `z80.c`, in ares: about 31 fps in attract, but only about 10 fps in the first mission, where emulating its sound driver takes about 1.7 seconds of N64 time per second of audio, so sound falls behind real time and is muted by the overload governor. With `Z80_CORE=asm`, in ares: about 48 fps in attract and 38 fps in the first mission, with sound in real time and no underruns. The driver keeps the Z80 busy about half the time (samsho2's: about 5%). No idle-skip entry: its main-loop wait counts its passes |
+| Metal Slug | 201 | Yes | Yes | Yes | Tested from a `.neo` set. Plays on PC. With `z80.c`, in ares: about 31 fps in attract, but only about 10 fps in the first mission, where emulating its sound driver takes about 1.7 seconds of N64 time per second of audio, so sound falls behind real time and is muted by the overload governor. With the default asm Z80 core, in ares: about 48 fps in attract and 38 fps in the first mission, with sound in real time and no underruns. The driver keeps the Z80 busy about half the time (samsho2's: about 5%). No idle-skip entry: its main-loop wait counts its passes |
 
 Other games have not been tested since sound was added.
 

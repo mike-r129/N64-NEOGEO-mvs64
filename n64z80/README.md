@@ -3,8 +3,8 @@
 A plain copy of [N64-Z80](https://github.com/mike-r129/N64-Z80), a MIPS
 assembly Z80 interpreter for the N64 that is bit-exact with `z80.c` (same
 struct, same `z80_run` / `z80_step` behaviour, same bus cycle stamps). Build
-mvs64 with it with `make ... Z80_CORE=asm` (see Makefile.mvs64); the default
-and the PC build use `z80.c`.
+mvs64 with `z80.c` instead with `make ... Z80_CORE=c` (see Makefile.mvs64); the
+PC build always uses `z80.c`.
 
 Source commit: `92eac143f718cfd88c82c18792b64bbefecb94ab` (branch `m5/integration`).
 

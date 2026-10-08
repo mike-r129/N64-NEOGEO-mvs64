@@ -11,12 +11,12 @@ include $(N64_INST)/include/n64.mk
 
 core_src = emu.c emu_diag.c input_script.c roms.c hw.c video.c platform_n64.c platform_n64_osd.c sprite_cache.c sound_neogeo.c z80_anchor.c z80.c ym2610/ym2610.c lib/rdl.c pcprof.c $(wildcard hle_*.c)
 rsp = rsp_video.S rsp_audio.S rsp_fm.S
-# Z80 core: c (z80.c, the default) or asm (the N64-Z80 MIPS core vendored in
-# n64z80/: make ... Z80_CORE=asm). The PC build always uses z80.c. The asm
+# Z80 core: asm (the N64-Z80 MIPS core vendored in n64z80/, the default) or c
+# (z80.c: make ... Z80_CORE=c). The PC build always uses z80.c. The asm
 # core's code starts on a 16 KB boundary and its data block at dcache page
 # offset 0xEC0, right after m64k's context (m64k/m64k_asm.S);
 # sound_neogeo.c pins the owner's Z80 data after it.
-Z80_CORE ?= c
+Z80_CORE ?= asm
 ifeq ($(Z80_CORE),asm)
 core_src := $(filter-out z80.c z80_anchor.c,$(core_src)) n64z80/n64z80.c
 z80_asm = n64z80/n64z80_asm.S
