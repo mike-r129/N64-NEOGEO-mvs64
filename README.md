@@ -7,22 +7,34 @@ This is a fork of [rasky/mvs64](https://github.com/rasky/mvs64), Giovanni
 Bajo's NeoGeo emulator for the N64. Upstream MVS64 has no sound and most games
 run below full speed. This fork adds the NeoGeo sound hardware, moves the
 audio synthesis onto the RSP, speeds up the 68000 core and the renderer, and
-adds the tools used to measure and check all of that. The work comes from a
-separate project that got Samurai Shodown II running on a real console; here
-it is generalized so it is not tied to that one game. The plan is to offer it
+adds the tools used to measure and check all of that. The plan is to offer it
 upstream once it has been discussed with the maintainer.
+
+The work comes from [N64-NEOGEO-Test](https://github.com/mike-r129/N64-NEOGEO-Test),
+the original bulk of the performance work, which specifically targeted Samurai
+Shodown II and got it running on a real console: sound, RSP audio, the 68000
+fast paths and the draw path were built and measured there against samsho2
+alone. Once samsho2 was stable, the changes were prepared for this repo, where
+they are generalized so they are not tied to that one game.
 
 ### Status
 
-MVS64 is still in an early stage. Only a handful of games boot or work, and
-only Samurai Shodown II (`samsho2`) has been tested with the changes below.
+MVS64 is stable on the games it has been tested with: Samurai Shodown II
+(`samsho2`) and Metal Slug, both with the changes below (see Compatibility).
+Other games have not been tested since sound was added, and some will need
+per-game settings or hardware that is not emulated yet.
 
 - **Sound** is emulated: the Z80 sound CPU and the YM2610 (FM, SSG,
   ADPCM-A/B). The FM and ADPCM synthesis runs on the RSP. Audio plays at
-  11,025 Hz on N64, and the ADPCM samples stream from the cart.
+  11,025 Hz on N64, and the ADPCM samples stream from the cart. The Z80 runs
+  on a hand-written MIPS assembly core ([N64-Z80](https://github.com/mike-r129/N64-Z80),
+  vendored in `n64z80/`) that is bit-exact with the portable `z80.c` and about
+  2.3x faster in game; it is the default on N64 and was tested on hardware.
 - **Speed:** samsho2's attract mode runs at 60 fps in ares. Fights do not
   hold 60 fps: they ran at about 50 fps on a real console in the samsho2
-  project, dropping to about 42 in the heaviest scenes.
+  project, dropping to about 42 in the heaviest scenes. Those figures were
+  measured before the asm Z80 core existed and have not been re-measured
+  since.
 - **Expansion Pak** recommended: with 8 MB the C-ROM tile cache gets 4,096
   slots instead of 1,280, which matters in busy scenes.
 - **Other games** need their own idle-skip entries (see below), and may use
