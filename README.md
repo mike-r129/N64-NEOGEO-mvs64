@@ -1,4 +1,50 @@
-## MVS64 -- A NeoGeo emulator for Nintendo 64
+﻿## MVS64 -- A NeoGeo emulator for Nintendo 64
+
+### Quick start
+
+You need a NeoGeo BIOS file, a game ROM (MAME-style `.zip`, `.neo`, or a zip containing `.neo`), and the [libdragon Docker container](https://github.com/anacierdem/libdragon-docker) (using either the [pre-patched fork](https://github.com/mike-r129/libdragon) or the patches in `patches/` — see below).
+
+```sh
+git clone https://github.com/mike-r129/N64-NEOGEO-mvs64
+cd N64-NEOGEO-mvs64
+```
+
+The [N64-Z80](https://github.com/mike-r129/N64-Z80) MIPS assembly Z80 core is vendored in `n64z80/` — no separate fetch needed.
+
+The build requires a patched libdragon for RSP audio to work correctly on real hardware. Pick one option:
+
+**Option A — clone the pre-patched fork (easiest):**
+```sh
+git clone https://github.com/mike-r129/libdragon libdragon
+libdragon install
+```
+
+**Option B — apply the patches to your existing libdragon source:**
+```sh
+cd libdragon
+patch -p1 < ../patches/libdragon-rspq-closed-loop-flush.patch
+patch -p1 < ../patches/libdragon-rspq-highpri-wedge.patch
+patch -p1 < ../patches/libdragon-rspq-lowpri-size.patch
+cd .. && libdragon install
+```
+
+Then start the container and build:
+```sh
+libdragon start
+make mvs64 BIOS=<path/to/bios.bin> ROM=<path/to/game.zip>
+```
+
+Output is `mvs64-<gamename>.z64` — load it in [ares](https://ares-emu.net/) or flash it to an EverDrive/64drive. On the controller, **Z** inserts a coin and **C-Up** is select.
+
+| # | Gotcha | Fix |
+|---|--------|-----|
+| 1 | ROM filename has spaces | Rename first: `mv "Metal Slug - Super Vehicle-001.zip" mslug.zip` |
+| 2 | `sfix.sfix` not found | Keep it in the **same folder** as the BIOS file — the build checks for it automatically |
+| 3 | RSP audio wedges on real hardware | Patch libdragon using one of the two options above — the patches fix two rspq races |
+| 4 | Build fails against libdragon trunk | Same fix as #3 |
+| 5 | Busy scenes drop frames | Use an **Expansion Pak** — the tile cache grows from 1,280 to 4,096 slots |
+
+MVS64 builds a self-contained `.z64` per game — there is no ROM picker at runtime.
 
 <img src="https://github.com/rasky/mvs64/raw/main/screens/image0.jpg" width="320">
 <img src="https://github.com/rasky/mvs64/raw/main/screens/pbobblen.png" width="320">
