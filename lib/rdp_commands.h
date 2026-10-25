@@ -16,8 +16,10 @@
 #define RDP_COLOR32(r,g,b,a) (uint32_t)(((r)<<24)|((g)<<16)|((b)<<8)|(a))
 
 // When compiling C/C++ code, 64-bit immediate operands require explicit
-// casting to a 64-bit type
-#ifdef __ASSEMBLER__
+// casting to a 64-bit type. libdragon preview's rdpq_macros.h defines the
+// same macro; keep its definition when it was included first.
+#ifdef cast64
+#elif defined(__ASSEMBLER__)
 #define cast64(x) (x)
 #else
 #include <stdint.h>
